@@ -1,0 +1,15 @@
+{
+  "id": "cua",
+  "name": "CUA Computer Use",
+  "description": "Computer-Use-Preview actions (OpenAI) via local CUA server. Provides screenshot with vision, click, type, scroll, keypress, drag, and more.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "description": "CUA computer-server URL (default: http://localhost:5000)"
+      }
+    }
+  }
+}

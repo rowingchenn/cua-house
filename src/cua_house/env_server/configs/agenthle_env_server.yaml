@@ -1,0 +1,31 @@
+host_id: agenthle-nested-kvm-01
+host_external_ip: auto
+public_base_host: auto
+runtime_root: /home/weichenzhang/agenthle-env-runtime
+task_data_root: /mnt/agenthle-task-data
+docker_image: trycua/cua-qemu-windows:latest
+host_reserved_cpu_cores: 2
+host_reserved_memory_gb: 8
+batch_heartbeat_ttl_s: 30
+heartbeat_ttl_s: 60
+ready_timeout_s: 900
+readiness_poll_interval_s: 5
+idle_slot_ttl_s: 300
+cua_port_range: [15000, 15999]
+novnc_port_range: [18000, 18999]
+
+# VM pool: snapshot-based persistent VMs (local runtime)
+# When configured, the server pre-boots these VMs at startup, takes a
+# QEMU snapshot at "ready" state, and uses loadvm to revert between tasks.
+# If empty, falls back to the original per-task container lifecycle.
+vm_pool:
+  - image_key: cpu-free
+    count: 3
+    cpu_cores: 4
+    memory_gb: 16
+
+# Snapshot settings
+snapshot_name: clean-ready
+snapshot_save_timeout_s: 300
+snapshot_revert_timeout_s: 300
+cua_ready_after_revert_timeout_s: 30
