@@ -1,23 +1,26 @@
 # cua-house
 
-`cua-house` is the standalone extraction of the AgentHLE `env_server` stack.
+Computer-use VM sandbox orchestrator.
 
-It provides:
+cua-house manages Docker+QEMU Windows VMs and GCP VMs for agent evaluation and training. It provides lease-based allocation, reverse proxying, snapshot-based fast revert, and task data staging with NTFS ACL isolation.
 
-- a FastAPI control plane for batch / lease management
-- local Docker + QEMU slot orchestration
-- optional GCP-backed VM runtime support
-- reverse proxying for leased CUA and noVNC endpoints
-- an admin image-bake helper plus bundled bridge assets
+## Architecture
 
-## Layout
+The project is a uv monorepo with three packages:
 
-- `src/cua_house/env_server/`: core scheduler, runtimes, API, client, configs
-- `src/cua_house/common/`: shared helpers kept with the extracted package
-- `src/cua_house/remote/`: remote CUA admin helpers used by image bake
-- `tests/`: extracted env-server tests
+| Package | Path | Description |
+|---------|------|-------------|
+| **cua-house-common** | `packages/common/` | Shared Pydantic models, state enums, event logger |
+| **cua-house-client** | `packages/client/` | Async HTTP client SDK for interacting with the server |
+| **cua-house-server** | `packages/server/` | FastAPI orchestration server (scheduler, runtimes, proxy, admin) |
 
-## Quick Start
+Supporting directories:
+
+- `bridges/` -- non-Python bridge assets for agent integration (MCP server, OpenClaw plugin)
+- `examples/` -- example configs and client usage
+- `docs/` -- architecture, deployment, and development documentation
+
+## Quick start
 
 ```bash
 cd cua-house
@@ -25,15 +28,29 @@ uv sync
 uv run cua-house-server
 ```
 
-Default config files live at:
-
-- `src/cua_house/env_server/configs/agenthle_env_server.yaml`
-- `src/cua_house/env_server/configs/agenthle_env_images.yaml`
-
-Run tests with:
+The server listens on port 8787 by default. Pass `--host-config` and `--image-catalog` to override the default config files.
 
 ```bash
-uv run pytest -q
+uv run cua-house-server --host-config /path/to/server.yaml --image-catalog /path/to/images.yaml
 ```
 
-The operational host playbooks still live in the main AgentHLE repository. This repo only carries the extracted runtime code and its immediate assets.
+## Running tests
+
+```bash
+uv run pytest
+```
+
+## Documentation
+
+See `docs/` for detailed documentation:
+
+- [Architecture overview](docs/architecture/overview.md)
+- [Runtime model](docs/architecture/runtime-model.md)
+- [Host setup](docs/deployment/host-setup.md)
+- [GCP infrastructure](docs/deployment/gcp-infra.md)
+- [Development setup](docs/development/setup.md)
+- [Testing](docs/development/testing.md)
+
+## License
+
+MIT

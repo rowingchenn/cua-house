@@ -1,0 +1,30 @@
+host_id: local-host-01
+host_external_ip: auto
+public_base_host: auto
+runtime_root: /home/weichenzhang/agenthle-env-runtime
+task_data_root: /mnt/agenthle-task-data
+docker_image: trycua/cua-qemu-windows:latest
+host_reserved_cpu_cores: 2
+host_reserved_memory_gb: 8
+batch_heartbeat_ttl_s: 30
+heartbeat_ttl_s: 60
+ready_timeout_s: 900
+readiness_poll_interval_s: 5
+idle_slot_ttl_s: 300
+cua_port_range: [15000, 15999]
+novnc_port_range: [18000, 18999]
+
+# VM pool: persistent VMs started from pre-baked qcow2 templates.
+# At startup the server copies the template qcow2 and starts each VM via
+# QEMU -loadvm <snapshot_name> (ready in ~30s, no cold boot).
+# snapshot_name must match both the VMPoolEntry entry AND the savevm name
+# baked into the template qcow2. It is also used as the key into images.yaml.
+vm_pool:
+  - snapshot_name: cpu-free
+    count: 1
+    cpu_cores: 4
+    memory_gb: 8
+
+# Snapshot revert settings (loadvm between tasks)
+snapshot_revert_timeout_s: 300
+cua_ready_after_revert_timeout_s: 30

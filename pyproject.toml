@@ -1,62 +1,38 @@
-[build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "cua-house"
+name = "cua-house-workspace"
 version = "0.1.0"
-description = "Standalone host-side VM allocator and reverse proxy extracted from AgentHLE env_server"
-readme = "README.md"
+description = "Computer-use VM sandbox orchestrator"
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
-authors = [
-    { name = "cua-house contributors" }
-]
-dependencies = [
-    "fastapi>=0.115.0",
-    "httpx>=0.27.0",
-    "pydantic>=2.8.0",
-    "PyYAML>=6.0",
-    "requests>=2.32.0",
-    "uvicorn>=0.27.0",
-    "websockets>=12.0",
-]
 
-[project.optional-dependencies]
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+cua-house-common = { workspace = true }
+cua-house-server = { workspace = true }
+cua-house-client = { workspace = true }
+
+[dependency-groups]
 dev = [
+    "cua-house-server",
+    "cua-house-client",
+    "cua-house-common",
     "pytest>=8.3.0",
     "pytest-asyncio>=1.3.0",
+    "ruff>=0.4.0",
 ]
-
-[project.scripts]
-cua-house-server = "cua_house.cli:main"
-cua-house-bake-image = "cua_house.env_server.bake_external_image:main"
-
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-"cua_house" = [
-    "env_server/configs/*.yaml",
-    "remote/bridges/*/package*.json",
-    "remote/bridges/*/*.json",
-    "remote/bridges/*/*.js",
-    "remote/bridges/*/*.cjs",
-    "remote/bridges/*/*.ts",
-    "remote/bridges/*/src/*.js",
-    "remote/bridges/*/src/*.ts",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
-[tool.black]
-line-length = 100
-target-version = ["py312", "py313"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages/*/tests", "tests"]

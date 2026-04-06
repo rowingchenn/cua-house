@@ -3,17 +3,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
 env/
 venv/
-ENV/
-.venv
+
+# uv
+uv.lock
 
 # Environment variables
-# .env
+.env
 .env.local
 **/.env
-# .gcp_vm_info.json
 
 # IDE
 .vscode/
@@ -26,43 +31,26 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Logs and results
+# Logs and runtime state
 *.log
+logs/
+.logs/
 results/
 runs/
 
-# Demonstrations (trace files and screenshots should not be in git)
-*/demonstrations/
-*/*/demonstrations/
+# Node.js (bridge assets)
+**/node_modules/
 
-# cua-bench config
-trycua/.cua/*.yaml
-trycua/cua-bench
-# submodule (tracked separately)
-submodules/cua/
+# Local development scratchpad (per-branch, not committed)
+CONTEXT.md
 
-uv.lock
-logs/
+# Claude Code
+.claude/
 
 # Build artifacts
 *.egg-info/
 
-# Node.js (CUA MCP Server, OpenClaw plugin)
-**/node_modules/
-
-# Task-local caches and local review evidence
-tasks/game/BlenderTask/uv_reproduction/.tmp_soft_eval/
-tasks/game/BlenderTask/uv_reproduction/**/__pycache__/
-tasks/**/important_observations/
-
-CONTEXT.md 
-.logs/
-
-# Task-local temporary working state
-tmp/
-tasks/**/tmp/
-tasks/**/temp/
-tasks/**/scratch/
-
-.claude/
-codex_batch_logs/
+# Test cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

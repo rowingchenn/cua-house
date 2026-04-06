@@ -1,0 +1,71 @@
+# cua-house-server host runtime configuration
+#
+# This file configures the server's host-level settings: identity,
+# resource limits, timeouts, and VM pool.
+
+# Unique identifier for this host (used in event logs and task assignments)
+host_id: my-host-01
+
+# External IP for constructing public URLs.
+# Set to "auto" on GCE to use the metadata API, or a static IP address.
+host_external_ip: auto
+
+# Base hostname for lease-based routing.
+# Set to "auto" to derive from external IP ({ip}.sslip.io).
+# Lease URLs become: lease-{id}.{public_base_host}:8787
+public_base_host: auto
+
+# Directory for runtime state (overlays, logs, events.jsonl).
+# Must have enough space for VM overlays (10+ GB each).
+runtime_root: /home/user/cua-house-runtime
+
+# Directory containing task input/reference/software data.
+# Set to null if tasks don't use task data.
+# For VM pool: mounted into containers at /shared/ and mapped as E: in guest.
+task_data_root: /mnt/task-data
+
+# Docker image for QEMU containers (local runtime).
+docker_image: trycua/cua-qemu-windows:latest
+
+# Host resources reserved (not allocated to VMs).
+# Available = total - reserved. Tasks exceeding available are rejected.
+host_reserved_cpu_cores: 2
+host_reserved_memory_gb: 8
+
+# Batch heartbeat TTL in seconds.
+# If the client stops sending batch heartbeats, all tasks are marked failed.
+batch_heartbeat_ttl_s: 30
+
+# Lease heartbeat TTL in seconds.
+# Individual lease timeout -- agent must send heartbeats more frequently than this.
+heartbeat_ttl_s: 60
+
+# Maximum time to wait for a VM to become ready (CUA /status returns 200).
+ready_timeout_s: 900
+
+# Polling interval for CUA readiness checks.
+readiness_poll_interval_s: 5
+
+# How long an idle slot is kept before cleanup (legacy mode).
+idle_slot_ttl_s: 300
+
+# Port ranges for CUA and noVNC endpoints (bind to 127.0.0.1).
+# Each VM uses one port from each range.
+cua_port_range: [15000, 15999]
+novnc_port_range: [18000, 18999]
+
+# VM pool: snapshot-based persistent VMs (local runtime only).
+# When configured, the server pre-boots these VMs at startup, takes QEMU
+# snapshots, and uses loadvm to revert between tasks.
+# If empty or omitted, falls back to per-task container lifecycle.
+vm_pool:
+  - image_key: cpu-free
+    count: 3
+    cpu_cores: 4
+    memory_gb: 16
+
+# Snapshot settings (only used with vm_pool)
+snapshot_name: clean-ready
+snapshot_save_timeout_s: 300
+snapshot_revert_timeout_s: 300
+cua_ready_after_revert_timeout_s: 30
