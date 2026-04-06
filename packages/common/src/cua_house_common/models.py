@@ -57,6 +57,7 @@ class TaskRequirement(BaseModel):
     task_path: str
     os_type: str | None = None
     snapshot_name: str
+    machine_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskDataRequest | None = None
 
@@ -102,6 +103,7 @@ class TaskStatus(BaseModel):
     task_path: str
     os_type: str | None = None
     snapshot_name: str
+    machine_type: str | None = None
     cpu_cores: int
     memory_gb: int
     metadata: dict[str, Any] = Field(default_factory=dict)

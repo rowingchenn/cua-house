@@ -16,28 +16,129 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class ImageSpec:
-    key: str
-    enabled: bool
-    default_cpu_cores: int
-    default_memory_gb: int
-    runtime_mode: str = "local"  # "local" | "gcp"
-    # local mode
-    template_qcow2_path: Path | None = None
-    # gcp mode
-    gcp_project: str | None = None
-    gcp_zone: str | None = None
-    gcp_network: str | None = None
-    gcp_service_account: str | None = None
-    gcp_machine_type: str | None = None
-    gcp_boot_image: str | None = None       # GCP image name for boot disk
-    gcp_boot_snapshot: str | None = None     # fallback: snapshot for boot disk
-    gcp_data_snapshot: str | None = None     # snapshot for data disk
-    gcp_boot_disk_gb: int = 64
-    gcp_data_disk_gb: int = 200
+class LocalImageConfig:
+    """Local QEMU runtime configuration for an image."""
+
+    template_qcow2_path: Path
+    default_cpu_cores: int = 4
+    default_memory_gb: int = 8
+
+
+@dataclass(slots=True)
+class GCPImageConfig:
+    """GCP runtime configuration for an image."""
+
+    project: str
+    zone: str
+    network: str
+    service_account: str
+    boot_image: str | None = None
+    boot_snapshot: str | None = None
+    boot_disk_gb: int = 64
+    data_snapshot: str | None = None
+    data_disk_gb: int = 200
     gpu_type: str | None = None
     gpu_count: int = 0
+    default_machine_type: str = "e2-standard-2"
     max_concurrent_vms: int = 4
+
+
+@dataclass(slots=True)
+class ImageSpec:
+    """Image specification supporting dual local/gcp modes.
+
+    At least one of ``local`` or ``gcp`` must be set.  The scheduler
+    picks the runtime based on which sub-configs are present and which
+    runtimes the server has available.
+    """
+
+    key: str
+    enabled: bool
+    local: LocalImageConfig | None = None
+    gcp: GCPImageConfig | None = None
+
+    # --- Backwards-compatible helpers ---
+
+    @property
+    def runtime_mode(self) -> str:
+        """Primary runtime mode (local preferred if both present)."""
+        if self.local is not None:
+            return "local"
+        return "gcp"
+
+    @property
+    def default_cpu_cores(self) -> int:
+        if self.local:
+            return self.local.default_cpu_cores
+        return 4
+
+    @property
+    def default_memory_gb(self) -> int:
+        if self.local:
+            return self.local.default_memory_gb
+        return 16
+
+    @property
+    def template_qcow2_path(self) -> Path | None:
+        return self.local.template_qcow2_path if self.local else None
+
+    @property
+    def golden_qcow2_path(self) -> Path | None:
+        """Alias for template_qcow2_path (used by qemu runtime)."""
+        return self.template_qcow2_path
+
+    # GCP convenience accessors (for gcp.py backward compat)
+    @property
+    def gcp_project(self) -> str | None:
+        return self.gcp.project if self.gcp else None
+
+    @property
+    def gcp_zone(self) -> str | None:
+        return self.gcp.zone if self.gcp else None
+
+    @property
+    def gcp_network(self) -> str | None:
+        return self.gcp.network if self.gcp else None
+
+    @property
+    def gcp_service_account(self) -> str | None:
+        return self.gcp.service_account if self.gcp else None
+
+    @property
+    def gcp_machine_type(self) -> str | None:
+        return self.gcp.default_machine_type if self.gcp else None
+
+    @property
+    def gcp_boot_image(self) -> str | None:
+        return self.gcp.boot_image if self.gcp else None
+
+    @property
+    def gcp_boot_snapshot(self) -> str | None:
+        return self.gcp.boot_snapshot if self.gcp else None
+
+    @property
+    def gcp_data_snapshot(self) -> str | None:
+        return self.gcp.data_snapshot if self.gcp else None
+
+    @property
+    def gcp_boot_disk_gb(self) -> int:
+        return self.gcp.boot_disk_gb if self.gcp else 64
+
+    @property
+    def gcp_data_disk_gb(self) -> int:
+        return self.gcp.data_disk_gb if self.gcp else 200
+
+    @property
+    def gpu_type(self) -> str | None:
+        return self.gcp.gpu_type if self.gcp else None
+
+    @property
+    def gpu_count(self) -> int:
+        return self.gcp.gpu_count if self.gcp else 0
+
+    @property
+    def max_concurrent_vms(self) -> int:
+        return self.gcp.max_concurrent_vms if self.gcp else 4
 
 
 @dataclass(slots=True)
@@ -59,6 +160,7 @@ class HostRuntimeConfig:
     novnc_port_range: tuple[int, int]
     # VM pool (snapshot-based local runtime)
     vm_pool: list[VMPoolEntry] = field(default_factory=list)
+    snapshot_save_timeout_s: int = 300
     snapshot_revert_timeout_s: int = 300
     cua_ready_after_revert_timeout_s: int = 30
 
@@ -95,6 +197,7 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         vm_pool=[
             VMPoolEntry(**entry) for entry in raw.get("vm_pool", [])
         ],
+        snapshot_save_timeout_s=int(raw.get("snapshot_save_timeout_s", 300)),
         snapshot_revert_timeout_s=int(raw.get("snapshot_revert_timeout_s", 300)),
         cua_ready_after_revert_timeout_s=int(raw.get("cua_ready_after_revert_timeout_s", 30)),
     )
@@ -105,31 +208,67 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
     images = raw.get("images", {})
     catalog: dict[str, ImageSpec] = {}
     for key, spec in images.items():
-        runtime_mode = spec.get("runtime_mode", "local")
-        image = ImageSpec(
+        local_cfg = None
+        gcp_cfg = None
+
+        # New nested format: local: {...}, gcp: {...}
+        if "local" in spec:
+            local_raw = spec["local"]
+            local_cfg = LocalImageConfig(
+                template_qcow2_path=Path(local_raw.get("template_qcow2_path") or local_raw.get("golden_qcow2_path", "")),
+                default_cpu_cores=int(local_raw.get("default_cpu_cores", 4)),
+                default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
+            )
+        if "gcp" in spec:
+            gcp_raw = spec["gcp"]
+            gcp_cfg = GCPImageConfig(
+                project=gcp_raw["project"],
+                zone=gcp_raw["zone"],
+                network=gcp_raw["network"],
+                service_account=gcp_raw["service_account"],
+                boot_image=gcp_raw.get("boot_image"),
+                boot_snapshot=gcp_raw.get("boot_snapshot"),
+                boot_disk_gb=int(gcp_raw.get("boot_disk_gb", 64)),
+                data_snapshot=gcp_raw.get("data_snapshot"),
+                data_disk_gb=int(gcp_raw.get("data_disk_gb", 200)),
+                gpu_type=gcp_raw.get("gpu_type"),
+                gpu_count=int(gcp_raw.get("gpu_count", 0)),
+                default_machine_type=gcp_raw.get("default_machine_type", "e2-standard-2"),
+                max_concurrent_vms=int(gcp_raw.get("max_concurrent_vms", 4)),
+            )
+
+        # Legacy flat format: runtime_mode + top-level fields
+        if local_cfg is None and gcp_cfg is None:
+            runtime_mode = spec.get("runtime_mode", "local")
+            if runtime_mode == "local":
+                local_cfg = LocalImageConfig(
+                    template_qcow2_path=Path(spec.get("template_qcow2_path") or spec.get("golden_qcow2_path", "")),
+                    default_cpu_cores=int(spec.get("default_cpu_cores", 4)),
+                    default_memory_gb=int(spec.get("default_memory_gb", 8)),
+                )
+            elif runtime_mode == "gcp":
+                gcp_cfg = GCPImageConfig(
+                    project=spec.get("gcp_project", ""),
+                    zone=spec.get("gcp_zone", ""),
+                    network=spec.get("gcp_network", ""),
+                    service_account=spec.get("gcp_service_account", ""),
+                    boot_image=spec.get("gcp_boot_image"),
+                    boot_snapshot=spec.get("gcp_boot_snapshot"),
+                    boot_disk_gb=int(spec.get("gcp_boot_disk_gb", 64)),
+                    data_snapshot=spec.get("gcp_data_snapshot"),
+                    data_disk_gb=int(spec.get("gcp_data_disk_gb", 200)),
+                    gpu_type=spec.get("gpu_type"),
+                    gpu_count=int(spec.get("gpu_count", 0)),
+                    default_machine_type=spec.get("gcp_machine_type", "e2-standard-2"),
+                    max_concurrent_vms=int(spec.get("max_concurrent_vms", 4)),
+                )
+
+        catalog[key] = ImageSpec(
             key=key,
             enabled=bool(spec.get("enabled", False)),
-            default_cpu_cores=int(spec.get("default_cpu_cores", 4)),
-            default_memory_gb=int(spec.get("default_memory_gb", 16)),
-            runtime_mode=runtime_mode,
+            local=local_cfg,
+            gcp=gcp_cfg,
         )
-        if runtime_mode == "local":
-            image.template_qcow2_path = Path(spec["template_qcow2_path"])
-        elif runtime_mode == "gcp":
-            image.gcp_project = spec.get("gcp_project")
-            image.gcp_zone = spec.get("gcp_zone")
-            image.gcp_network = spec.get("gcp_network")
-            image.gcp_service_account = spec.get("gcp_service_account")
-            image.gcp_machine_type = spec.get("gcp_machine_type")
-            image.gcp_boot_image = spec.get("gcp_boot_image")
-            image.gcp_boot_snapshot = spec.get("gcp_boot_snapshot")
-            image.gcp_data_snapshot = spec.get("gcp_data_snapshot")
-            image.gcp_boot_disk_gb = int(spec.get("gcp_boot_disk_gb", 64))
-            image.gcp_data_disk_gb = int(spec.get("gcp_data_disk_gb", 200))
-            image.gpu_type = spec.get("gpu_type")
-            image.gpu_count = int(spec.get("gpu_count", 0))
-            image.max_concurrent_vms = int(spec.get("max_concurrent_vms", 4))
-        catalog[key] = image
     return catalog
 
 

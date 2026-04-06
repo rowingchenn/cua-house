@@ -28,14 +28,14 @@ from cua_house_server.scheduler.models import (
 )
 from cua_house_server._internal.port_pool import PortPool
 from cua_house_server.runtimes.qemu import DockerQemuRuntime, VMHandle
-from cua_house_server.runtimes.gcp import GCPVMRuntime
+from cua_house_server.runtimes.gcp import GCPVMRuntime, GCPSlotHandle
 from cua_house_server.config.loader import HostRuntimeConfig, ImageSpec
 
 logger = logging.getLogger(__name__)
 
 
 class EnvScheduler:
-    """Single-host image-grouped scheduler."""
+    """Single-host image-grouped scheduler with local pool + GCP on-demand."""
 
     def __init__(
         self,
@@ -66,6 +66,10 @@ class EnvScheduler:
         # VM pool state (snapshot-based persistent VMs for local runtime)
         self._vms: dict[str, VMRecord] = {}
         self._vm_handles: dict[str, VMHandle] = {}
+        # GCP on-demand handles (keyed by lease_id)
+        self._gcp_handles: dict[str, GCPSlotHandle] = {}
+        # Track which lease uses which runtime mode
+        self._lease_runtime: dict[str, str] = {}  # lease_id -> "local" | "gcp"
 
     async def start(self) -> None:
         for rt in self._runtimes.values():
@@ -110,6 +114,10 @@ class EnvScheduler:
             self._lease_reaper_task.cancel()
             await asyncio.gather(self._lease_reaper_task, return_exceptions=True)
 
+    # ------------------------------------------------------------------
+    # Batch submission
+    # ------------------------------------------------------------------
+
     async def submit_batch(self, request: BatchCreateRequest) -> BatchStatus:
         created = utcnow()
         batch_id = request.batch_id or str(uuid4())
@@ -118,15 +126,13 @@ class EnvScheduler:
                 raise ValueError(f"batch_id already exists: {batch_id}")
             tasks: list[TaskStatus] = []
             for req in request.tasks:
-                # Resolve cpu/mem from vm_pool entry (snapshot_name must match a pool entry)
-                pool_entry = self._resolve_pool_entry(req.snapshot_name)
-                cpu_cores = pool_entry.cpu_cores
-                memory_gb = pool_entry.memory_gb
+                cpu_cores, memory_gb = self._resolve_resources(req.snapshot_name, req.machine_type)
                 task = TaskStatus(
                     task_id=req.task_id,
                     task_path=req.task_path,
                     os_type=req.os_type,
                     snapshot_name=req.snapshot_name,
+                    machine_type=req.machine_type,
                     cpu_cores=cpu_cores,
                     memory_gb=memory_gb,
                     metadata=req.metadata,
@@ -136,13 +142,16 @@ class EnvScheduler:
                     created_at=created,
                     updated_at=created,
                 )
-                if not self._fits_host_total(cpu_cores, memory_gb):
-                    task.state = TaskState.FAILED
-                    task.error = (
-                        f"task requires {cpu_cores} vCPU / {memory_gb} GiB, exceeding host allocatable capacity "
-                        f"of {self._max_allocatable_cpu()} vCPU / {self._max_allocatable_memory_gb()} GiB"
-                    )
-                    task.completed_at = created
+                # Only check host capacity for local mode
+                image = self.images.get(req.snapshot_name)
+                if image and image.local and "local" in self._runtimes:
+                    if not self._fits_host_total(cpu_cores, memory_gb):
+                        task.state = TaskState.FAILED
+                        task.error = (
+                            f"task requires {cpu_cores} vCPU / {memory_gb} GiB, exceeding host allocatable capacity "
+                            f"of {self._max_allocatable_cpu()} vCPU / {self._max_allocatable_memory_gb()} GiB"
+                        )
+                        task.completed_at = created
                 self._tasks[task.task_id] = task
                 tasks.append(task)
             batch = BatchStatus(
@@ -179,11 +188,16 @@ class EnvScheduler:
                         task_id=task.task_id,
                         os_type=task.os_type,
                         snapshot_name=task.snapshot_name,
+                        machine_type=task.machine_type,
                         cpu_cores=task.cpu_cores,
                         memory_gb=task.memory_gb,
                     )
         self._ensure_dispatch()
         return await self.get_batch(batch_id)
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
 
     async def get_batch(self, batch_id: str) -> BatchStatus:
         async with self._lock:
@@ -236,6 +250,10 @@ class EnvScheduler:
                 logger.warning("Lease %s disappeared while cancelling batch %s", lease_id, batch_id)
         return await self.get_batch(batch_id)
 
+    # ------------------------------------------------------------------
+    # Heartbeat & completion
+    # ------------------------------------------------------------------
+
     async def heartbeat(self, lease_id: str) -> LeaseHeartbeatResponse:
         async with self._lock:
             lease = self._leases[lease_id]
@@ -253,39 +271,45 @@ class EnvScheduler:
     async def complete(self, lease_id: str, *, final_status: str, details: dict[str, Any] | None = None) -> TaskStatus:
         details = details or {}
         task_id: str | None = None
-        already_completing = False
         should_reset = False
+        runtime_mode: str | None = None
         async with self._lock:
             lease = self._leases.get(lease_id)
             if lease is None:
                 raise KeyError(f"unknown lease_id: {lease_id}")
             task = self._tasks[lease.task_id]
             task_id = task.task_id
+            runtime_mode = self._lease_runtime.get(lease_id, "local")
             if task.state in {TaskState.RESETTING, TaskState.COMPLETED, TaskState.FAILED}:
-                # Another caller (reaper or duplicate client call) already started
-                # completing this lease. Return current status without error — the
-                # reset is in progress and will finish on its own.
-                already_completing = True
+                pass  # already completing
             else:
                 task.state = TaskState.RESETTING
                 task.updated_at = utcnow()
                 should_reset = True
-                vm = self._vms[lease.slot_id]
-                vm.state = VMState.REVERTING
-                vm.last_used_at = utcnow()
                 lease.final_status = final_status
+                if runtime_mode == "local":
+                    vm = self._vms[lease.slot_id]
+                    vm.state = VMState.REVERTING
+                    vm.last_used_at = utcnow()
                 self.event_logger.emit(
                     "lease_complete_requested",
                     lease_id=lease_id,
                     task_id=task.task_id,
-                    vm_id=vm.vm_id,
+                    runtime_mode=runtime_mode,
                     final_status=final_status,
                     details=details,
                 )
         assert task_id is not None
         if should_reset:
-            asyncio.create_task(self._release_after_reset(lease_id, final_status, details))
+            if runtime_mode == "gcp":
+                asyncio.create_task(self._release_gcp_slot(lease_id, final_status, details))
+            else:
+                asyncio.create_task(self._release_after_reset(lease_id, final_status, details))
         return await self.get_task(task_id)
+
+    # ------------------------------------------------------------------
+    # Staging
+    # ------------------------------------------------------------------
 
     async def stage_runtime(self, lease_id: str) -> LeaseStageResponse:
         return await self._stage_phase(lease_id, phase="runtime")
@@ -302,16 +326,33 @@ class EnvScheduler:
             if task.state not in {TaskState.READY, TaskState.LEASED}:
                 raise RuntimeError(f"lease {lease_id} is not stageable in state {task.state.value}")
             task_data = task.task_data
-            vm_handle = self._vm_handles[lease.slot_id]
+            runtime_mode = self._lease_runtime.get(lease_id, "local")
 
-        result = await self.runtime.stage_task_phase(
-            handle=vm_handle,
-            task_id=task.task_id,
-            lease_id=lease_id,
-            task_data=task_data,
-            phase=phase,
-            container_name=vm_handle.container_name,
-        )
+        if runtime_mode == "gcp":
+            gcp_handle = self._gcp_handles.get(lease_id)
+            if gcp_handle is None:
+                return LeaseStageResponse(lease_id=lease_id, task_id=task.task_id, phase=phase, skipped=True)
+            gcp_rt = self._runtimes.get("gcp")
+            if not isinstance(gcp_rt, GCPVMRuntime):
+                return LeaseStageResponse(lease_id=lease_id, task_id=task.task_id, phase=phase, skipped=True)
+            image = self._resolve_image(task.snapshot_name)
+            result = await gcp_rt.stage_task_phase(
+                handle=gcp_handle,
+                task_id=task.task_id,
+                lease_id=lease_id,
+                task_data=task_data,
+                phase=phase,
+            )
+        else:
+            vm_handle = self._vm_handles[lease.slot_id]
+            result = await self.runtime.stage_task_phase(
+                handle=vm_handle,
+                task_id=task.task_id,
+                lease_id=lease_id,
+                task_data=task_data,
+                phase=phase,
+                container_name=vm_handle.container_name,
+            )
         return LeaseStageResponse(
             lease_id=lease_id,
             task_id=task.task_id,
@@ -320,6 +361,10 @@ class EnvScheduler:
             file_count=result.file_count,
             bytes_staged=result.bytes_staged,
         )
+
+    # ------------------------------------------------------------------
+    # Local VM release (revert snapshot)
+    # ------------------------------------------------------------------
 
     async def _release_after_reset(self, lease_id: str, final_status: str, details: dict[str, Any]) -> None:
         async with self._lock:
@@ -345,6 +390,7 @@ class EnvScheduler:
                 vm.lease_id = None
                 vm.last_used_at = utcnow()
                 del self._leases[lease_id]
+                self._lease_runtime.pop(lease_id, None)
                 self.event_logger.emit(
                     "task_finished",
                     task_id=task.task_id,
@@ -363,6 +409,7 @@ class EnvScheduler:
                 task.completed_at = utcnow()
                 vm.state = VMState.BROKEN
                 del self._leases[lease_id]
+                self._lease_runtime.pop(lease_id, None)
                 self.event_logger.emit(
                     "vm_revert_failed",
                     vm_id=vm.vm_id,
@@ -371,6 +418,53 @@ class EnvScheduler:
                     error=str(exc),
                 )
             asyncio.create_task(self._auto_replace_vm(vm.vm_id))
+        self._ensure_dispatch()
+
+    # ------------------------------------------------------------------
+    # GCP slot release (destroy VM)
+    # ------------------------------------------------------------------
+
+    async def _release_gcp_slot(self, lease_id: str, final_status: str, details: dict[str, Any]) -> None:
+        async with self._lock:
+            lease = self._leases[lease_id]
+            task = self._tasks[lease.task_id]
+            gcp_handle = self._gcp_handles.get(lease_id)
+
+        new_state = TaskState.COMPLETED if final_status == "completed" else TaskState.FAILED
+        gcp_rt = self._runtimes.get("gcp")
+
+        try:
+            if gcp_handle is not None and isinstance(gcp_rt, GCPVMRuntime):
+                image = self._resolve_image(task.snapshot_name)
+                await gcp_rt.reset_slot(gcp_handle, image)
+            async with self._lock:
+                task.state = new_state
+                task.updated_at = utcnow()
+                task.completed_at = utcnow()
+                if details:
+                    task.metadata["completion_details"] = details
+                del self._leases[lease_id]
+                self._gcp_handles.pop(lease_id, None)
+                self._lease_runtime.pop(lease_id, None)
+                self.event_logger.emit(
+                    "task_finished",
+                    task_id=task.task_id,
+                    batch_id=task.batch_id,
+                    lease_id=lease_id,
+                    runtime_mode="gcp",
+                    vm_name=gcp_handle.vm_name if gcp_handle else "unknown",
+                    final_status=new_state.value,
+                )
+        except Exception as exc:
+            logger.exception("Failed to destroy GCP VM for lease %s", lease_id)
+            async with self._lock:
+                task.state = TaskState.FAILED
+                task.error = f"GCP VM cleanup failed: {exc}"
+                task.updated_at = utcnow()
+                task.completed_at = utcnow()
+                del self._leases[lease_id]
+                self._gcp_handles.pop(lease_id, None)
+                self._lease_runtime.pop(lease_id, None)
         self._ensure_dispatch()
 
     async def _auto_replace_vm(self, vm_id: str) -> None:
@@ -401,60 +495,223 @@ class EnvScheduler:
                 error=str(exc),
             )
 
+    # ------------------------------------------------------------------
+    # Dispatch loop
+    # ------------------------------------------------------------------
+
     def _ensure_dispatch(self) -> None:
         if self._dispatch_task is None or self._dispatch_task.done():
             self._dispatch_task = asyncio.create_task(self._dispatch_loop())
 
     async def _dispatch_loop(self) -> None:
         while True:
+            gcp_dispatch_info: dict | None = None
+
             async with self._lock:
                 candidate = self._pick_next_task_locked()
                 if candidate is None:
                     self._refresh_batch_states_locked()
                     return
 
-                vm = self._find_free_vm_locked(candidate.snapshot_name)
-                if vm is None:
+                image = self.images.get(candidate.snapshot_name)
+                if image is None or not image.enabled:
+                    candidate.state = TaskState.FAILED
+                    candidate.error = f"image not found or disabled: {candidate.snapshot_name}"
+                    candidate.updated_at = utcnow()
+                    candidate.completed_at = utcnow()
                     self._refresh_batch_states_locked()
-                    return  # all VMs busy
+                    continue
 
-                # Assign task → VM immediately (VM already running, ready in pool)
-                vm.state = VMState.LEASED
-                vm.task_id = candidate.task_id
-                vm.last_used_at = utcnow()
-                candidate.state = TaskState.STARTING
-                candidate.updated_at = utcnow()
+                # Try local dispatch first
+                if image.local and "local" in self._runtimes:
+                    vm = self._find_free_vm_locked(candidate.snapshot_name)
+                    if vm is not None:
+                        self._assign_local_locked(candidate, vm)
+                        continue  # try dispatching more tasks
+                    # No free local VM — task waits in queue
+                    self._refresh_batch_states_locked()
+                    return
+
+                # GCP dispatch (on-demand VM creation)
+                if image.gcp and "gcp" in self._runtimes:
+                    active = self._gcp_active_count_locked(candidate.snapshot_name)
+                    if active >= image.max_concurrent_vms:
+                        self._refresh_batch_states_locked()
+                        return  # at GCP capacity, wait
+
+                    # Mark STARTING and prepare for async GCP creation
+                    candidate.state = TaskState.STARTING
+                    candidate.updated_at = utcnow()
+                    gcp_dispatch_info = {
+                        "task_id": candidate.task_id,
+                        "snapshot_name": candidate.snapshot_name,
+                        "machine_type": candidate.machine_type,
+                        "batch_id": candidate.batch_id,
+                    }
+                    self._refresh_batch_states_locked()
+                    # Don't return — fall through to async GCP creation below
+                else:
+                    # Neither local nor GCP available
+                    candidate.state = TaskState.FAILED
+                    candidate.error = f"no runtime available for image: {candidate.snapshot_name}"
+                    candidate.updated_at = utcnow()
+                    candidate.completed_at = utcnow()
+                    self._refresh_batch_states_locked()
+                    continue
+
+            # Async GCP VM creation (outside lock)
+            if gcp_dispatch_info is not None:
+                asyncio.create_task(self._create_gcp_slot(gcp_dispatch_info))
+                # Continue dispatching other tasks
+                continue
+
+    def _assign_local_locked(self, candidate: TaskStatus, vm: VMRecord) -> None:
+        """Assign a queued task to a ready local VM (must hold lock)."""
+        vm.state = VMState.LEASED
+        vm.task_id = candidate.task_id
+        vm.last_used_at = utcnow()
+        candidate.state = TaskState.STARTING
+        candidate.updated_at = utcnow()
+
+        lease = LeaseRecord(
+            task_id=candidate.task_id,
+            slot_id=vm.vm_id,
+            expires_at=utcnow() + timedelta(seconds=self.host_config.heartbeat_ttl_s),
+        )
+        self._leases[lease.lease_id] = lease
+        self._lease_runtime[lease.lease_id] = "local"
+        vm.lease_id = lease.lease_id
+
+        assignment = TaskAssignment(
+            host_id=self.host_config.host_id,
+            lease_id=lease.lease_id,
+            slot_id=vm.vm_id,
+            snapshot_name=candidate.snapshot_name,
+        )
+        # Populate CUA/noVNC URLs for local VMs
+        vm_handle = self._vm_handles.get(vm.vm_id)
+        if vm_handle is not None:
+            assignment.cua_url = self.runtime.vm_cua_local_url(vm_handle)
+            assignment.novnc_url = self.runtime.vm_novnc_local_url(vm_handle)
+
+        candidate.lease_id = lease.lease_id
+        candidate.assignment = assignment
+        candidate.state = TaskState.READY
+        candidate.updated_at = utcnow()
+
+        self._refresh_batch_states_locked()
+        self.event_logger.emit(
+            "task_ready",
+            batch_id=candidate.batch_id,
+            task_id=candidate.task_id,
+            slot_id=vm.vm_id,
+            lease_id=lease.lease_id,
+            snapshot_name=candidate.snapshot_name,
+            runtime_mode="local",
+            queue_wait_s=(utcnow() - candidate.created_at).total_seconds(),
+        )
+
+    async def _create_gcp_slot(self, info: dict) -> None:
+        """Async GCP VM creation — runs outside the main lock."""
+        task_id = info["task_id"]
+        snapshot_name = info["snapshot_name"]
+        machine_type = info.get("machine_type")
+
+        gcp_rt = self._runtimes.get("gcp")
+        if not isinstance(gcp_rt, GCPVMRuntime):
+            async with self._lock:
+                task = self._tasks.get(task_id)
+                if task:
+                    task.state = TaskState.FAILED
+                    task.error = "GCP runtime not available"
+                    task.updated_at = utcnow()
+                    task.completed_at = utcnow()
+            return
+
+        try:
+            image = self._resolve_image(snapshot_name)
+            slot_id = str(uuid4())[:8]
+            lease_id = str(uuid4())
+
+            handle = gcp_rt.prepare_slot(
+                slot_id=slot_id,
+                image=image,
+                cpu_cores=image.default_cpu_cores,
+                memory_gb=image.default_memory_gb,
+                cua_port=5000,
+                novnc_port=0,
+                lease_id=lease_id,
+                task_id=task_id,
+            )
+            handle.machine_type = machine_type
+
+            logger.info("Creating GCP VM %s for task %s (machine_type=%s)...",
+                        handle.vm_name, task_id, machine_type or image.gcp_machine_type)
+            await gcp_rt.start_slot(handle)
+
+            cua_url = gcp_rt.cua_local_url(handle)
+            novnc_url = gcp_rt.novnc_local_url(handle)
+
+            async with self._lock:
+                task = self._tasks.get(task_id)
+                if task is None or task.state != TaskState.STARTING:
+                    # Task was cancelled while we were creating the VM
+                    logger.warning("Task %s no longer STARTING after GCP VM creation; destroying VM", task_id)
+                    await gcp_rt.reset_slot(handle, image)
+                    return
 
                 lease = LeaseRecord(
-                    task_id=candidate.task_id,
-                    slot_id=vm.vm_id,
+                    task_id=task_id,
+                    slot_id=slot_id,
                     expires_at=utcnow() + timedelta(seconds=self.host_config.heartbeat_ttl_s),
                 )
-                self._leases[lease.lease_id] = lease
-                vm.lease_id = lease.lease_id
+                lease.lease_id = lease_id
+                self._leases[lease_id] = lease
+                self._gcp_handles[lease_id] = handle
+                self._lease_runtime[lease_id] = "gcp"
 
                 assignment = TaskAssignment(
                     host_id=self.host_config.host_id,
-                    lease_id=lease.lease_id,
-                    slot_id=vm.vm_id,
-                    snapshot_name=candidate.snapshot_name,
+                    lease_id=lease_id,
+                    slot_id=slot_id,
+                    snapshot_name=snapshot_name,
+                    cua_url=cua_url,
+                    novnc_url=novnc_url,
                 )
-                candidate.lease_id = lease.lease_id
-                candidate.assignment = assignment
-                candidate.state = TaskState.READY
-                candidate.updated_at = utcnow()
-
+                task.lease_id = lease_id
+                task.assignment = assignment
+                task.state = TaskState.READY
+                task.updated_at = utcnow()
                 self._refresh_batch_states_locked()
+
                 self.event_logger.emit(
                     "task_ready",
-                    batch_id=candidate.batch_id,
-                    task_id=candidate.task_id,
-                    slot_id=vm.vm_id,
-                    lease_id=lease.lease_id,
-                    snapshot_name=candidate.snapshot_name,
-                    queue_wait_s=(utcnow() - candidate.created_at).total_seconds(),
+                    batch_id=task.batch_id,
+                    task_id=task_id,
+                    slot_id=slot_id,
+                    lease_id=lease_id,
+                    snapshot_name=snapshot_name,
+                    runtime_mode="gcp",
+                    vm_name=handle.vm_name,
+                    vm_ip=handle.vm_ip,
+                    machine_type=machine_type or image.gcp_machine_type,
                 )
-                # continue to dispatch more tasks if possible
+                logger.info("GCP VM %s ready for task %s (IP=%s)", handle.vm_name, task_id, handle.vm_ip)
+
+        except Exception as exc:
+            logger.exception("Failed to create GCP VM for task %s", task_id)
+            async with self._lock:
+                task = self._tasks.get(task_id)
+                if task and task.state == TaskState.STARTING:
+                    task.state = TaskState.FAILED
+                    task.error = f"GCP VM creation failed: {exc}"
+                    task.updated_at = utcnow()
+                    task.completed_at = utcnow()
+                    self._refresh_batch_states_locked()
+
+    # ------------------------------------------------------------------
+    # Lease reaping
+    # ------------------------------------------------------------------
 
     async def _lease_reaper_loop(self) -> None:
         while True:
@@ -488,11 +745,32 @@ class EnvScheduler:
             except Exception:
                 logger.exception("Failed to cancel expired batch %s", batch_id)
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _pick_next_task_locked(self) -> TaskStatus | None:
         queued = [task for task in self._tasks.values() if task.state == TaskState.QUEUED]
         if not queued:
             return None
         return min(queued, key=lambda t: t.created_at)
+
+    def _resolve_resources(self, snapshot_name: str, machine_type: str | None = None) -> tuple[int, int]:
+        """Resolve cpu_cores and memory_gb for a task.
+
+        For local: use image.local defaults or vm_pool entry.
+        For GCP: use image.gcp defaults (actual resources determined by machine_type at creation).
+        """
+        image = self.images.get(snapshot_name)
+        if image is not None:
+            return image.default_cpu_cores, image.default_memory_gb
+
+        # Legacy fallback: check vm_pool entries
+        for entry in self.host_config.vm_pool:
+            if entry.snapshot_name == snapshot_name:
+                return entry.cpu_cores, entry.memory_gb
+
+        raise ValueError(f"unknown snapshot_name: {snapshot_name}")
 
     def _resolve_pool_entry(self, snapshot_name: str) -> "VMPoolEntry":
         from cua_house_common.models import VMPoolEntry
@@ -525,6 +803,14 @@ class EnvScheduler:
                 return vm
         return None
 
+    def _gcp_active_count_locked(self, snapshot_name: str) -> int:
+        """Count active GCP VMs for a given image key."""
+        count = 0
+        for handle in self._gcp_handles.values():
+            if handle.image_key == snapshot_name:
+                count += 1
+        return count
+
     def _refresh_batch_states_locked(self) -> None:
         for batch in self._batches.values():
             batch.tasks = [self._tasks[task.task_id].model_copy(deep=True) for task in batch.tasks]
@@ -546,8 +832,17 @@ class EnvScheduler:
     async def resolve_proxy_targets(self, lease_id: str) -> tuple[str, str]:
         async with self._lock:
             lease = self._leases[lease_id]
-            vm_handle = self._vm_handles[lease.slot_id]
-            return self.runtime.vm_cua_local_url(vm_handle), self.runtime.vm_novnc_local_url(vm_handle)
+            runtime_mode = self._lease_runtime.get(lease_id, "local")
+
+            if runtime_mode == "gcp":
+                gcp_handle = self._gcp_handles.get(lease_id)
+                if gcp_handle is None:
+                    raise KeyError(f"GCP handle not found for lease {lease_id}")
+                gcp_rt = self._runtimes["gcp"]
+                return gcp_rt.cua_local_url(gcp_handle), gcp_rt.novnc_local_url(gcp_handle)
+            else:
+                vm_handle = self._vm_handles[lease.slot_id]
+                return self.runtime.vm_cua_local_url(vm_handle), self.runtime.vm_novnc_local_url(vm_handle)
 
 
 def os_cpu_count() -> int:

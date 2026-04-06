@@ -29,8 +29,8 @@ def create_app(*, host_config_path: str | Path, image_catalog_path: str | Path) 
 
     # Build runtimes based on enabled images
     runtimes: dict[str, DockerQemuRuntime | GCPVMRuntime] = {}
-    has_local = any(img.runtime_mode == "local" and img.enabled for img in images.values())
-    has_gcp = any(img.runtime_mode == "gcp" and img.enabled for img in images.values())
+    has_local = any(img.local is not None and img.enabled for img in images.values())
+    has_gcp = any(img.gcp is not None and img.enabled for img in images.values())
     if has_local:
         runtimes["local"] = DockerQemuRuntime(host_config, event_logger=event_logger)
     if has_gcp:
