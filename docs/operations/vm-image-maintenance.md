@@ -10,7 +10,7 @@ How to update the Windows VM images used by cua-house. There are two image types
 | `cpu-free` | `golden.qcow2` | `agenthle-dev-cpu-free-agents-baked-20260405` | 2026-04-05 | Previous — External agents baked (Node.js 24.12, Claude Code, Codex, OpenClaw, MCP Server, CUA Plugin) |
 | `cpu-license` | `golden.qcow2` | `agenthle-dev-cpu-licensed-agents-baked-20260405` | 2026-04-05 | Not yet updated with bridge changes |
 
-> Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.27.19.30).
+> Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.69.191.152).
 
 ---
 
