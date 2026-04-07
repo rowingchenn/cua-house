@@ -1,6 +1,18 @@
 # VM image maintenance
 
-How to update the Windows VM images used by cua-house. There are two image types with different workflows:
+How to update the Windows VM images used by cua-house. There are two image types with different workflows.
+
+## Current local images (kvm0)
+
+| Image key | qcow2 file | GCP source snapshot | Date | Description |
+|-----------|-----------|---------------------|------|-------------|
+| `cpu-free` | `cpu-free-20260406.qcow2` | `agenthle-dev-cpu-free-export-20260406` | 2026-04-06 | **Active** — Bridge update: MCP action tools text-only, OpenClaw plugin synced. Auto-snapshot by cua-house server. |
+| `cpu-free` | `golden.qcow2` | `agenthle-dev-cpu-free-agents-baked-20260405` | 2026-04-05 | Previous — External agents baked (Node.js 24.12, Claude Code, Codex, OpenClaw, MCP Server, CUA Plugin) |
+| `cpu-license` | `golden.qcow2` | `agenthle-dev-cpu-licensed-agents-baked-20260405` | 2026-04-05 | Not yet updated with bridge changes |
+
+> Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.27.19.30).
+
+---
 
 | Image key | Where it runs | Asset type |
 |-----------|--------------|------------|
