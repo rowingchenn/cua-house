@@ -366,8 +366,9 @@ class DockerQemuRuntime:
             "--cap-add", "NET_ADMIN",
             # storage_dir contains vm.qcow2 (pre-baked, no separate golden needed)
             "-v", f"{handle.storage_dir}:/storage",
-            # Mount entire task-data disk (read-only) for all VMs
-            "-v", f"{self.config.task_data_root}:/shared:ro",
+            # Mount task-data under /shared/agenthle so VM sees E:\agenthle\...
+            # (rw needed for NTFS ACL staging via icacls in _apply_runtime_acls)
+            "-v", f"{self.config.task_data_root}:/shared/agenthle:rw",
             # Patched boot.sh: converts pflash vars to qcow2 + loadvm support
             "-v", f"{patched_boot}:/run/boot.sh:ro",
             "-p", f"127.0.0.1:{handle.cua_port}:5000",
