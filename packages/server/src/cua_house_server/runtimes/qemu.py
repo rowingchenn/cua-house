@@ -247,6 +247,7 @@ class DockerQemuRuntime:
         novnc_ports = PortPool(*self.config.novnc_port_range)
 
         handles: list[VMHandle] = []
+        prepare_args: list[dict] = []
         for entry in pool_entries:
             # snapshot_name doubles as the image catalog key for local VMs
             image = images.get(entry.snapshot_name)
@@ -257,7 +258,7 @@ class DockerQemuRuntime:
                 vm_id = str(uuid4())
                 cua_port = cua_ports.allocate()
                 novnc_port = novnc_ports.allocate()
-                handle = self._prepare_vm(
+                prepare_args.append(dict(
                     vm_id=vm_id,
                     image=image,
                     cpu_cores=entry.cpu_cores,
@@ -265,8 +266,17 @@ class DockerQemuRuntime:
                     cua_port=cua_port,
                     novnc_port=novnc_port,
                     snapshot_name=entry.snapshot_name,
-                )
-                handles.append(handle)
+                ))
+
+        # Copy template qcow2 files in parallel (the slow part: ~62GB each)
+        logger.info("Copying %d template qcow2 files in parallel...", len(prepare_args))
+        copy_start = time.perf_counter()
+        prepare_results = await asyncio.gather(
+            *[asyncio.to_thread(self._prepare_vm, **args) for args in prepare_args],
+        )
+        copy_s = time.perf_counter() - copy_start
+        logger.info("Template copies completed in %.1fs", copy_s)
+        handles = list(prepare_results)
 
         # Start all VMs in parallel via loadvm (pre-baked snapshot)
         async def _boot_one(h: VMHandle) -> None:
