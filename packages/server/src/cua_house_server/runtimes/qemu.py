@@ -328,7 +328,8 @@ class DockerQemuRuntime:
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy template qcow2 (contains pre-baked savevm snapshot)
-        disk = storage_dir / "vm.qcow2"
+        # Docker image expects "data.qcow2" (DISK_NAME=data in dockur/windows)
+        disk = storage_dir / "data.qcow2"
         if disk.exists():
             disk.unlink()
         shutil.copy2(template, disk)

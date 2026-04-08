@@ -8,6 +8,7 @@ How to update the Windows VM images used by cua-house. There are two image types
 |-----------|-----------|---------------------|------|-------------|
 | `cpu-free` | `cpu-free-20260406.qcow2` | `agenthle-dev-cpu-free-export-20260406` | 2026-04-06 | **Active** — Bridge update: MCP action tools text-only, OpenClaw plugin synced. Auto-snapshot by cua-house server. |
 | `cpu-free` | `golden.qcow2` | `agenthle-dev-cpu-free-agents-baked-20260405` | 2026-04-05 | Previous — External agents baked (Node.js 24.12, Claude Code, Codex, OpenClaw, MCP Server, CUA Plugin) |
+| `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `agenthle-ubuntu-agents-baked-20260408` | 2026-04-08 | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). |
 | `cpu-license` | `golden.qcow2` | `agenthle-dev-cpu-licensed-agents-baked-20260405` | 2026-04-05 | Not yet updated with bridge changes |
 
 > Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.69.191.152).
@@ -298,3 +299,101 @@ gpu-free:
 ```
 
 Restart cua-house-server to pick up the new config. GCP VMs are created on-demand so no pool restart is needed.
+
+---
+
+## Ubuntu VMs (kvm0): `cpu-free-ubuntu`
+
+Ubuntu VM images follow the same workflow as CPU Windows images with these differences:
+
+### Guest requirements
+
+The Ubuntu qcow2 must have:
+
+- **Docker disabled**: `systemctl disable docker docker.socket containerd`. Guest Docker creates a `docker0` bridge with `172.17.0.0/16` routes that conflict with the container's Docker network, breaking port forwarding.
+- **Wildcard netplan**: QEMU virtio-net interface names vary by PCI slot. Use match-all:
+  ```yaml
+  # /etc/netplan/50-cloud-init.yaml
+  network:
+    version: 2
+    renderer: networkd
+    ethernets:
+      all-en:
+        match:
+          name: "en*"
+        dhcp4: true
+      all-eth:
+        match:
+          name: "eth*"
+        dhcp4: true
+  ```
+- **iptables flush service**: GCP guest agent injects iptables rules that persist in snapshots. Add a oneshot service:
+  ```ini
+  # /etc/systemd/system/flush-iptables.service
+  [Unit]
+  Description=Flush iptables rules for non-GCP environments
+  Before=network-pre.target
+  Wants=network-pre.target
+  [Service]
+  Type=oneshot
+  ExecStart=/usr/sbin/iptables -F
+  ExecStart=/usr/sbin/iptables -X
+  ExecStart=/usr/sbin/iptables -P INPUT ACCEPT
+  ExecStart=/usr/sbin/iptables -P FORWARD ACCEPT
+  ExecStart=/usr/sbin/iptables -P OUTPUT ACCEPT
+  [Install]
+  WantedBy=multi-user.target
+  ```
+- **GCP agents disabled**: `systemctl disable google-cloud-ops-agent google-guest-agent google-osconfig-agent`
+- **No data disk fstab entry**: Remove any UUID-based mount for the GCP data disk.
+
+### Docker image
+
+Ubuntu images use `trycua/cua-qemu-windows:latest` (same as Windows). The dockur/windows base boots any UEFI qcow2 regardless of OS. `trycua/cua-qemu-linux:latest` is for fresh ISO installs only and does not support importing existing qcow2 disks.
+
+### Baking the snapshot
+
+The cold boot and savevm workflow is the same as Windows (see Steps 3-4 above), but use the patched boot.sh (pflash qcow2 conversion + loadvm support) and `--cap-add NET_ADMIN`:
+
+```bash
+# Generate patched boot.sh via server code
+cd /home/weichenzhang/cua-house
+uv run python3 -c '
+from cua_house_server.config.loader import load_host_runtime_config
+from cua_house_server.runtimes.qemu import DockerQemuRuntime
+cfg = load_host_runtime_config("/path/to/server.yaml")
+rt = DockerQemuRuntime(cfg)
+print(rt._ensure_patched_boot_sh())
+'
+
+# Start container with patched boot.sh (no LOADVM_SNAPSHOT for cold boot)
+docker run -d --name ubuntu-bake \
+    --device=/dev/kvm \
+    --cap-add NET_ADMIN \
+    -v /tmp/bake/storage:/storage \
+    -v /home/weichenzhang/agenthle-env-runtime/boot-patched.sh:/run/boot.sh:ro \
+    -p 127.0.0.1:16000:5000 \
+    -e RAM_SIZE=8G -e CPU_CORES=4 -e CPU_MODEL=host -e HV=N \
+    -e 'ARGUMENTS=-qmp tcp:0.0.0.0:7200,server,nowait' \
+    trycua/cua-qemu-windows:latest
+
+# Wait ~7 min for cold boot, verify CUA
+curl -s http://127.0.0.1:16000/status
+
+# savevm via telnet monitor (port 7100)
+docker exec ubuntu-bake bash -c 'echo savevm cpu-free-ubuntu | timeout 120 nc localhost 7100'
+```
+
+### Current GCP dev VM
+
+| VM name | IP | Zone | Purpose |
+|---------|---|------|---------|
+| `agenthle-ubuntu` | ephemeral | us-west2-a | Ubuntu 22.04 source VM. CUA server + agents pre-installed. |
+
+### Image storage
+
+All images (Windows and Ubuntu) stored on the dedicated 512 GB image disk:
+
+- Mount: `/mnt/agenthle-env-images` (ext4, label `agenthle-images`)
+- Symlink: `/home/weichenzhang/agenthle-env-images` → `/mnt/agenthle-env-images`
+- Disk: `agenthle-nested-kvm-01-images` (pd-balanced, us-central1-a)

@@ -25,7 +25,8 @@ Example:
 
 ```
 /home/user/agenthle-env-runtime/                          # runtime_root
-/home/user/agenthle-env-images/cpu-free/cpu-free-20260405.qcow2  # template qcow2
+/mnt/agenthle-env-images/cpu-free/cpu-free-20260406.qcow2       # Windows template
+/mnt/agenthle-env-images/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2  # Ubuntu template
 /mnt/agenthle-task-data/                                  # task_data_root
 ```
 
