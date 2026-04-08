@@ -6,11 +6,11 @@ task_data_root: /mnt/agenthle-task-data
 docker_image: trycua/cua-qemu-windows:latest
 host_reserved_cpu_cores: 2
 host_reserved_memory_gb: 8
-batch_heartbeat_ttl_s: 30
-heartbeat_ttl_s: 60
+batch_heartbeat_ttl_s: 7200
+heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 300
+idle_slot_ttl_s: 7200
 cua_port_range: [15000, 15999]
 novnc_port_range: [18000, 18999]
 
@@ -21,7 +21,7 @@ novnc_port_range: [18000, 18999]
 # baked into the template qcow2. It is also used as the key into images.yaml.
 vm_pool:
   - snapshot_name: cpu-free
-    count: 1
+    count: 4
     cpu_cores: 4
     memory_gb: 8
 
