@@ -328,6 +328,11 @@ class EnvScheduler:
             task_data = task.task_data
             runtime_mode = self._lease_runtime.get(lease_id, "local")
 
+        # Infer os_type from snapshot_name if client didn't send it
+        os_type = task.os_type
+        if os_type is None and ("ubuntu" in task.snapshot_name or "linux" in task.snapshot_name):
+            os_type = "linux"
+
         if runtime_mode == "gcp":
             gcp_handle = self._gcp_handles.get(lease_id)
             if gcp_handle is None:
@@ -342,6 +347,7 @@ class EnvScheduler:
                 lease_id=lease_id,
                 task_data=task_data,
                 phase=phase,
+                os_type=os_type,
             )
         else:
             vm_handle = self._vm_handles[lease.slot_id]
@@ -352,6 +358,7 @@ class EnvScheduler:
                 task_data=task_data,
                 phase=phase,
                 container_name=vm_handle.container_name,
+                os_type=os_type,
             )
         return LeaseStageResponse(
             lease_id=lease_id,

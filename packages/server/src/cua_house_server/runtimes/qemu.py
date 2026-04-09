@@ -213,6 +213,7 @@ class DockerQemuRuntime:
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
+        os_type: str | None = None,
     ) -> StageResult:
         cname = container_name or handle.container_name
         cua_url = self.vm_cua_local_url(handle)
@@ -224,6 +225,7 @@ class DockerQemuRuntime:
             phase=phase,
             container_name=cname,
             vm_pool=True,
+            os_type=os_type,
         )
 
     # -- VM pool (snapshot-based persistent VMs) -----------------------

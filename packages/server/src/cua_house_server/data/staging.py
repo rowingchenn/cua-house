@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 PhaseName = Literal["runtime", "eval"]
 
 SAMBA_SHARE_ROOT = r"\\host.lan\Data"
+LINUX_DATA_MOUNT = "/media/user/data/agenthle"
+LINUX_SAMBA_SOURCE = "//host.lan/Data/agenthle"
 
 
 @dataclass(slots=True)
@@ -86,6 +88,7 @@ class TaskDataManager:
         phase: PhaseName,
         container_name: str | None = None,
         vm_pool: bool = False,
+        os_type: str | None = None,
     ) -> StageResult:
         if task_data is None or not task_data.requires_task_data:
             return StageResult(skipped=True)
@@ -107,6 +110,7 @@ class TaskDataManager:
                     cua_url=cua_url,
                     task_data=task_data,
                     phase=phase,
+                    os_type=os_type,
                 )
             else:
                 result = await self._stage_samba(
@@ -151,33 +155,42 @@ class TaskDataManager:
         cua_url: str,
         task_data: TaskRequirement.TaskDataRequest,
         phase: PhaseName,
+        os_type: str | None = None,
     ) -> StageResult:
-        """Stage task data for VM-pool VMs using E: drive + NTFS ACLs.
+        """Stage task data for VM-pool VMs.
 
-        In the VM pool, the entire task-data disk is mounted at
-        ``/shared/`` -> ``\\\\host.lan\\Data`` inside the guest.
-        We map it as E: and use NTFS ACLs for isolation -- same approach
-        as GCPVMRuntime.
+        Windows: E: drive mapping via Samba + NTFS ACLs (icacls).
+        Linux: CIFS mount at /media/user/data/agenthle + chmod.
         """
+        is_linux = os_type in ("linux", "ubuntu")
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)) as client:
             if phase == "runtime":
-                # 1. Map E: drive from Samba share
-                await self._map_e_drive(client, cua_url)
-
-                # 2. Create output directory
-                if task_data.remote_output_dir:
-                    await self._ensure_remote_dir(client, cua_url, task_data.remote_output_dir)
-
-                # 3. Apply NTFS ACLs to restrict access
-                await self._apply_runtime_acls(client, cua_url, task_data)
+                if is_linux:
+                    await self._mount_data_linux(client, cua_url)
+                    # Reset output dir so stale files from prior runs don't
+                    # leak in (host upper layer persists across VM reverts).
+                    if task_data.remote_output_dir:
+                        await self._reset_remote_dir_linux(client, cua_url, task_data.remote_output_dir)
+                    await self._apply_runtime_acls_linux(client, cua_url, task_data)
+                else:
+                    await self._map_e_drive(client, cua_url)
+                    # Reset output dir (same reasoning as Linux branch).
+                    if task_data.remote_output_dir:
+                        await self._reset_remote_dir(client, cua_url, task_data.remote_output_dir)
+                    await self._apply_runtime_acls(client, cua_url, task_data)
 
             else:  # eval
-                # Unlock reference directory
                 if task_data.reference_dir:
-                    await self._run_remote(
-                        client, cua_url,
-                        f'icacls "{task_data.reference_dir}" /remove:d User /Q',
-                    )
+                    if is_linux:
+                        await self._run_remote(
+                            client, cua_url,
+                            f'chmod -R 755 "{task_data.reference_dir}"',
+                        )
+                    else:
+                        await self._run_remote(
+                            client, cua_url,
+                            f'icacls "{task_data.reference_dir}" /remove:d User /Q',
+                        )
                     self.event_logger.emit(
                         "task_data_reference_unlocked",
                         reference_dir=task_data.reference_dir,
@@ -254,12 +267,95 @@ class TaskDataManager:
         )
 
     async def _list_subdirs(self, client: httpx.AsyncClient, cua_url: str, path: str) -> list[str]:
-        """List subdirectory names using cmd dir."""
+        """List subdirectory names using cmd dir (Windows)."""
         result = await self._run_remote(client, cua_url, f'dir "{path}" /AD /B')
         stdout = (result.get("stdout", "") or "").strip()
         if not stdout or result.get("return_code", 1) != 0:
             return []
         return [s.strip() for s in stdout.splitlines() if s.strip()]
+
+    # ------------------------------------------------------------------
+    # Linux VM pool staging helpers
+    # ------------------------------------------------------------------
+
+    async def _mount_data_linux(self, client: httpx.AsyncClient, cua_url: str) -> None:
+        """Mount Samba share via CIFS inside the Linux guest."""
+        await self._run_remote(
+            client, cua_url,
+            f"sudo mkdir -p {LINUX_DATA_MOUNT} && "
+            f"mountpoint -q {LINUX_DATA_MOUNT} || "
+            f"sudo mount -t cifs {LINUX_SAMBA_SOURCE} {LINUX_DATA_MOUNT} "
+            f"-o guest,uid=1000,gid=1000,file_mode=0755,dir_mode=0755",
+        )
+
+    async def _apply_runtime_acls_linux(
+        self,
+        client: httpx.AsyncClient,
+        cua_url: str,
+        task_data: TaskRequirement.TaskDataRequest,
+    ) -> None:
+        """Deny access to non-whitelisted dirs using chmod (Linux equivalent of icacls)."""
+        whitelist = set()
+        for d in (task_data.input_dir, task_data.software_dir, task_data.remote_output_dir):
+            if d:
+                whitelist.add(d.rstrip("/").rsplit("/", 1)[-1].lower())
+
+        task_dir = task_data.input_dir.rstrip("/").rsplit("/", 1)[0] if task_data.input_dir else None
+        if not task_dir:
+            return
+
+        # 1. Deny non-whitelisted subdirs in task dir
+        subdirs = await self._list_subdirs_linux(client, cua_url, task_dir)
+        for subdir in subdirs:
+            if subdir.lower() not in whitelist:
+                await self._run_remote(
+                    client, cua_url,
+                    f'chmod -R 000 "{task_dir}/{subdir}"',
+                )
+
+        # 2. Deny sibling tasks in same category
+        category_dir = task_dir.rsplit("/", 1)[0]
+        task_name = task_dir.rsplit("/", 1)[-1]
+        siblings = await self._list_subdirs_linux(client, cua_url, category_dir)
+        for sibling in siblings:
+            if sibling != task_name:
+                await self._run_remote(
+                    client, cua_url,
+                    f'chmod -R 000 "{category_dir}/{sibling}"',
+                )
+
+        # 3. Deny other categories
+        data_root = category_dir.rsplit("/", 1)[0]
+        category_name = category_dir.rsplit("/", 1)[-1]
+        categories = await self._list_subdirs_linux(client, cua_url, data_root)
+        for cat in categories:
+            if cat != category_name:
+                await self._run_remote(
+                    client, cua_url,
+                    f'chmod -R 000 "{data_root}/{cat}"',
+                )
+
+        self.event_logger.emit(
+            "task_data_acl_locked",
+            input_dir=task_data.input_dir,
+            software_dir=task_data.software_dir,
+        )
+
+    async def _list_subdirs_linux(self, client: httpx.AsyncClient, cua_url: str, path: str) -> list[str]:
+        """List subdirectory names using ls (Linux)."""
+        result = await self._run_remote(client, cua_url, f'ls -1 "{path}" 2>/dev/null')
+        stdout = (result.get("stdout", "") or "").strip()
+        if not stdout or result.get("return_code", 1) != 0:
+            return []
+        return [s.strip() for s in stdout.splitlines() if s.strip()]
+
+    async def _ensure_remote_dir_linux(self, client: httpx.AsyncClient, cua_url: str, remote_dir: str) -> None:
+        """Create directory on Linux guest."""
+        await self._run_remote(client, cua_url, f'mkdir -p "{remote_dir}"')
+
+    async def _reset_remote_dir_linux(self, client: httpx.AsyncClient, cua_url: str, remote_dir: str) -> None:
+        """Remove and recreate directory on Linux guest (clears stale content)."""
+        await self._run_remote(client, cua_url, f'rm -rf "{remote_dir}" && mkdir -p "{remote_dir}"')
 
     # ------------------------------------------------------------------
     # Samba-based staging (original per-container path)

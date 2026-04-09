@@ -67,6 +67,7 @@ class RuntimeBackend(Protocol):
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
+        os_type: str | None = None,
     ) -> StageResult:
         """Stage task data into the guest for a given phase."""
         ...
