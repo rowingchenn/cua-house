@@ -113,11 +113,54 @@ Only port 8787 needs to be open to clients. Internal CUA ports (15000-15999) and
 
 ## Task data disk provisioning
 
-If tasks require input/reference data:
+Task data is organized as `{category}/{task_tag}/{variant}/input/`, `reference/`, `software/`, `output/`. In VM pool mode, `task_data_root` is bind-mounted into each container at `/shared/agenthle` and exposed to guests via Samba (Windows: `E:` drive; Linux: CIFS mount at `/media/user/data/agenthle`).
 
-1. Mount or create a directory at `task_data_root` (e.g., `/mnt/agenthle-task-data`).
-2. Organize data as `{category}/{task_tag}/{variant}/input/`, `reference/`, `software/`.
-3. For VM pool mode, this directory is mounted into containers at `/shared/` and mapped as `E:` via Samba inside the guest.
+### Simple setup (single-node, read-write)
+
+Mount a local writable disk at `task_data_root` (e.g., `/mnt/agenthle-task-data`) and populate it from GCS:
+
+```bash
+gsutil -m rsync -r gs://agenthle/task-data/ /mnt/agenthle-task-data/
+```
+
+### Multi-node setup (shared read-only + OverlayFS)
+
+To share a single task-data disk across multiple KVM nodes without duplication, attach the GCP persistent disk to multiple VMs in `READ_ONLY` mode and use OverlayFS on each node to provide a local writable layer. Writes (e.g., `output/`) land on the local upper layer; reads of `input/`, `reference/`, `software/` transparently pass through to the shared disk.
+
+```bash
+# 1. Attach the disk in multi-reader mode
+gcloud compute instances attach-disk <node> \
+    --disk=<shared-task-data-disk> --device-name=task-data --mode=ro \
+    --zone=<zone> --project=<project>
+
+# 2. Mount the shared disk at a separate lower-layer path
+sudo mkdir -p /mnt/agenthle-task-data-ro
+sudo mount -o ro,noload /dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro
+# (noload skips ext4 journal replay — required for read-only multi-attach)
+
+# 3. Create upper + work dirs on a local writable filesystem (XFS recommended)
+sudo mkdir -p /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
+sudo chown $(id -u):$(id -g) /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
+
+# 4. Mount the overlay at task_data_root (what the server reads)
+sudo mkdir -p /mnt/agenthle-task-data
+sudo mount -t overlay overlay \
+    -o lowerdir=/mnt/agenthle-task-data-ro,upperdir=/mnt/xfs/task-data-upper,workdir=/mnt/xfs/task-data-work \
+    /mnt/agenthle-task-data
+```
+
+To persist across reboots, add to `/etc/fstab`:
+
+```
+LABEL=<disk-label> /mnt/agenthle-task-data-ro ext4 ro,noload,nofail 0 0
+overlay /mnt/agenthle-task-data overlay lowerdir=/mnt/agenthle-task-data-ro,upperdir=/mnt/xfs/task-data-upper,workdir=/mnt/xfs/task-data-work,nofail 0 0
+```
+
+The upper layer (`/mnt/xfs/task-data-upper/`) accumulates over time. The server's staging phase resets each task's `output/` dir before every run, so stale outputs don't leak between task executions. You can periodically wipe the entire upper layer if disk usage grows too large:
+
+```bash
+sudo rm -rf /mnt/xfs/task-data-upper/* /mnt/xfs/task-data-work/*
+```
 
 ## Environment variables
 
