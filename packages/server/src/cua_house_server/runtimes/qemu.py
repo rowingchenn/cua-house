@@ -428,6 +428,10 @@ class DockerQemuRuntime:
             # Snapshot-compatible CPU settings
             "-e", "CPU_MODEL=host",  # removes migratable=no
             "-e", "HV=N",  # removes hv_passthrough
+            # Fix guest IP: dockur derives VM IP from container IP, but loadvm
+            # restores the snapshot's IP. Force all containers to use 172.30.0.2
+            # so DHCP/ARP matches the snapshot state.
+            "-e", "VM_NET_IP=172.30.0.2",
             # Load the pre-baked snapshot on QEMU start (skips Windows cold boot)
             "-e", f"LOADVM_SNAPSHOT={handle.snapshot_name}",
             self.config.docker_image,
@@ -448,7 +452,7 @@ class DockerQemuRuntime:
     def _ensure_patched_boot_sh(self) -> Path:
         """Patch the Docker image's boot.sh for snapshot support.
 
-        Two patches applied to the dockur/windows boot.sh:
+        Three patches applied to the dockur/windows boot.sh:
 
         1. **pflash qcow2 + snapshot tag**: QEMU -loadvm requires the snapshot
            tag to exist in ALL writable drives. The docker image creates pflash
@@ -457,6 +461,12 @@ class DockerQemuRuntime:
 
         2. **-loadvm flag**: Inject -loadvm $LOADVM_SNAPSHOT into QEMU args
            so VMs resume from the pre-baked snapshot instead of cold-booting.
+
+        3. **Disable boot watchdog**: The dockur/windows entry.sh runs
+           ``( sleep 30; boot ) &`` which kills QEMU if the serial console
+           has no output after 30s. With -loadvm (especially Linux guests),
+           no serial output is produced, so the watchdog would kill the VM.
+           We touch $QEMU_END to make boot() return immediately.
         """
         patched = self.config.runtime_root / "boot-patched.sh"
         if patched.exists():
@@ -503,6 +513,25 @@ class DockerQemuRuntime:
         else:
             logger.warning("Could not find insertion point in boot.sh for loadvm patch.")
             content = content.rstrip() + loadvm_snippet
+
+        # Patch 3: disable boot watchdog for loadvm
+        # entry.sh runs `( sleep 30; boot ) &` which kills QEMU if serial
+        # console has no output after 30s (Ubuntu/loadvm produces none).
+        # boot() checks `[ -f /run/shm/qemu.end ] && return 0`.
+        # We use a delayed touch because power.sh (sourced AFTER boot.sh)
+        # runs `rm -f /run/shm/qemu.*` at source time.
+        watchdog_snippet = (
+            '\n# cua-house: disable boot watchdog (no serial output with loadvm)\n'
+            'if [ -n "$LOADVM_SNAPSHOT" ]; then\n'
+            '  ( sleep 10; touch /run/shm/qemu.end ) &\n'
+            'fi\n'
+        )
+        # Insert at very end of boot.sh (before final return 0)
+        content = content.rstrip()
+        if content.endswith('return 0'):
+            content = content[:-len('return 0')] + watchdog_snippet + '\nreturn 0'
+        else:
+            content += watchdog_snippet
 
         patched.write_text(content, encoding="utf-8")
         patched.chmod(0o755)
