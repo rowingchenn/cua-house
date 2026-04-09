@@ -246,7 +246,11 @@ class DockerQemuRuntime:
         cua_ports = PortPool(*self.config.cua_port_range)
         novnc_ports = PortPool(*self.config.novnc_port_range)
 
+        # Ensure template qcow2 files exist locally (pull from GCS if needed)
+        await self._ensure_local_templates(images)
+
         handles: list[VMHandle] = []
+        prepare_args: list[dict] = []
         for entry in pool_entries:
             # snapshot_name doubles as the image catalog key for local VMs
             image = images.get(entry.snapshot_name)
@@ -257,7 +261,7 @@ class DockerQemuRuntime:
                 vm_id = str(uuid4())
                 cua_port = cua_ports.allocate()
                 novnc_port = novnc_ports.allocate()
-                handle = self._prepare_vm(
+                prepare_args.append(dict(
                     vm_id=vm_id,
                     image=image,
                     cpu_cores=entry.cpu_cores,
@@ -265,8 +269,17 @@ class DockerQemuRuntime:
                     cua_port=cua_port,
                     novnc_port=novnc_port,
                     snapshot_name=entry.snapshot_name,
-                )
-                handles.append(handle)
+                ))
+
+        # Copy template qcow2 files in parallel (instant on XFS via reflink)
+        logger.info("Copying %d template qcow2 files in parallel...", len(prepare_args))
+        copy_start = time.perf_counter()
+        prepare_results = await asyncio.gather(
+            *[asyncio.to_thread(self._prepare_vm, **args) for args in prepare_args],
+        )
+        copy_s = time.perf_counter() - copy_start
+        logger.info("Template copies completed in %.1fs", copy_s)
+        handles = list(prepare_results)
 
         # Start all VMs in parallel via loadvm (pre-baked snapshot)
         async def _boot_one(h: VMHandle) -> None:
@@ -305,6 +318,41 @@ class DockerQemuRuntime:
         )
         return ready_handles
 
+    async def _ensure_local_templates(self, images: dict[str, ImageSpec]) -> None:
+        """Ensure template qcow2 files exist locally, pulling from GCS if needed.
+
+        On a fresh node, templates are downloaded from GCS on first startup.
+        Subsequent startups skip the download (files already on local XFS disk).
+        """
+        for key, image in images.items():
+            if not image.enabled or image.local is None:
+                continue
+            local_path = image.local.template_qcow2_path
+            gcs_uri = image.local.gcs_uri
+            if local_path.exists():
+                logger.info("Template %s exists locally: %s", key, local_path)
+                continue
+            if gcs_uri is None:
+                raise FileNotFoundError(
+                    f"Template {local_path} not found and no gcs_uri configured for {key}"
+                )
+            logger.info("Pulling template %s from %s ...", key, gcs_uri)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            pull_start = time.perf_counter()
+            await asyncio.to_thread(
+                self._run, ["gsutil", "-m", "cp", gcs_uri, str(local_path)],
+            )
+            pull_s = time.perf_counter() - pull_start
+            size_gb = local_path.stat().st_size / 1e9
+            logger.info("Template %s pulled in %.1fs (%.1f GB)", key, pull_s, size_gb)
+            self.event_logger.emit(
+                "template_pulled",
+                image_key=key,
+                gcs_uri=gcs_uri,
+                pull_s=pull_s,
+                size_gb=round(size_gb, 1),
+            )
+
     def _prepare_vm(
         self,
         *,
@@ -327,11 +375,13 @@ class DockerQemuRuntime:
         storage_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy template qcow2 (contains pre-baked savevm snapshot)
-        disk = storage_dir / "vm.qcow2"
+        # Copy template qcow2 (contains pre-baked savevm snapshot).
+        # Uses --reflink=auto: instant on XFS, falls back to full copy on ext4.
+        # Docker image expects "data.qcow2" (DISK_NAME=data in dockur/windows)
+        disk = storage_dir / "data.qcow2"
         if disk.exists():
             disk.unlink()
-        shutil.copy2(template, disk)
+        self._run(["cp", "--reflink=auto", str(template), str(disk)])
 
         container_name = f"cua-house-env-{vm_id}"
         return VMHandle(
@@ -396,11 +446,17 @@ class DockerQemuRuntime:
         log_path.write_text(result.stdout or "", encoding="utf-8")
 
     def _ensure_patched_boot_sh(self) -> Path:
-        """Create a patched boot.sh with two cua-house modifications:
+        """Patch the Docker image's boot.sh for snapshot support.
 
-        1. Convert pflash vars from raw to qcow2 format (required for loadvm).
-        2. Append -loadvm $LOADVM_SNAPSHOT to QEMU args when that env var is set
-           (enables fast startup from pre-baked snapshot instead of cold boot).
+        Two patches applied to the dockur/windows boot.sh:
+
+        1. **pflash qcow2 + snapshot tag**: QEMU -loadvm requires the snapshot
+           tag to exist in ALL writable drives. The docker image creates pflash
+           UEFI vars as raw format (no snapshot support). We convert to qcow2
+           and create an empty snapshot tag so -loadvm succeeds.
+
+        2. **-loadvm flag**: Inject -loadvm $LOADVM_SNAPSHOT into QEMU args
+           so VMs resume from the pre-baked snapshot instead of cold-booting.
         """
         patched = self.config.runtime_root / "boot-patched.sh"
         if patched.exists():
@@ -409,44 +465,44 @@ class DockerQemuRuntime:
         # Extract boot.sh from the Docker image
         self._run(["docker", "create", "--name", "tmp-boot-extract", self.config.docker_image, "true"], check=False)
         try:
-            self._run(
-                ["docker", "cp", "tmp-boot-extract:/run/boot.sh", str(patched)],
-            )
+            self._run(["docker", "cp", "tmp-boot-extract:/run/boot.sh", str(patched)])
         finally:
             self._run(["docker", "rm", "tmp-boot-extract"], check=False)
 
         content = patched.read_text(encoding="utf-8")
 
-        # Patch 1: convert pflash vars to qcow2 format
+        # Patch 1: pflash vars — convert raw→qcow2, create empty snapshot tag
         old_pflash = 'BOOT_OPTS+=" -drive file=$DEST.vars,if=pflash,unit=1,format=raw"'
         new_pflash = (
-            '# cua-house: convert pflash vars to qcow2 for loadvm support\n'
+            '# cua-house: pflash must be qcow2 with matching snapshot tag for -loadvm\n'
             '    if [ -f "$DEST.vars" ] && ! qemu-img info "$DEST.vars" 2>/dev/null | grep -q "file format: qcow2"; then\n'
             '      qemu-img convert -f raw -O qcow2 "$DEST.vars" "$DEST.vars.q2"\n'
             '      mv "$DEST.vars.q2" "$DEST.vars"\n'
             '    fi\n'
+            '    if [ -n "$LOADVM_SNAPSHOT" ] && ! qemu-img snapshot -l "$DEST.vars" 2>/dev/null | grep -q "$LOADVM_SNAPSHOT"; then\n'
+            '      qemu-img snapshot -c "$LOADVM_SNAPSHOT" "$DEST.vars" 2>/dev/null || true\n'
+            '    fi\n'
             '    BOOT_OPTS+=" -drive file=$DEST.vars,if=pflash,unit=1,format=qcow2"'
         )
         if old_pflash not in content:
-            logger.warning("Could not apply pflash patch to boot.sh -- line not found. Snapshots may fail.")
+            logger.warning("Could not apply pflash patch to boot.sh -- line not found.")
         else:
             content = content.replace(old_pflash, new_pflash)
 
-        # Patch 2: loadvm support -- append -loadvm flag when LOADVM_SNAPSHOT is set
-        loadvm_patch = (
-            '\n# cua-house: load pre-baked snapshot if requested (fast startup)\n'
+        # Patch 2: inject -loadvm before boot.sh returns
+        loadvm_snippet = (
+            '\n# cua-house: resume from pre-baked snapshot\n'
             'if [ -n "$LOADVM_SNAPSHOT" ]; then\n'
             '  BOOT_OPTS+=" -loadvm $LOADVM_SNAPSHOT"\n'
-            'fi\n'
+            'fi\n\n'
         )
-        # Insert just before the line that launches QEMU (last BOOT_OPTS usage before exec)
-        qemu_launch_marker = 'exec qemu-system-x86_64'
-        if qemu_launch_marker in content:
-            content = content.replace(qemu_launch_marker, loadvm_patch + qemu_launch_marker, 1)
+        if 'return 0' in content:
+            content = content.replace('return 0', loadvm_snippet + 'return 0', 1)
+        elif 'exec qemu-system-x86_64' in content:
+            content = content.replace('exec qemu-system-x86_64', loadvm_snippet + 'exec qemu-system-x86_64', 1)
         else:
-            # Fallback: append at end of file
-            logger.warning("Could not find QEMU launch line in boot.sh; appending loadvm patch at end.")
-            content = content.rstrip() + loadvm_patch
+            logger.warning("Could not find insertion point in boot.sh for loadvm patch.")
+            content = content.rstrip() + loadvm_snippet
 
         patched.write_text(content, encoding="utf-8")
         patched.chmod(0o755)

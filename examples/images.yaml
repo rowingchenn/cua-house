@@ -15,8 +15,12 @@ images:
     runtime_mode: local
 
     # Path to the golden QCOW2 image on the host filesystem.
-    # This file is mounted read-only; each VM gets a copy-on-write overlay.
+    # Each VM gets a copy (reflink on XFS, full copy on ext4).
     golden_qcow2_path: /home/user/images/cpu-free/golden.qcow2
+
+    # Optional: GCS URI for the template. If template_qcow2_path does not
+    # exist locally, the server pulls it from GCS on first startup.
+    # gcs_uri: gs://my-bucket/templates/cpu-free/golden.qcow2
 
     # Default resources when task does not specify cpu_cores/memory_gb
     default_cpu_cores: 4

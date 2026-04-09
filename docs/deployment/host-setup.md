@@ -8,7 +8,9 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 - Docker installed and running
 - `/dev/kvm` accessible (nested virtualization enabled if running on a cloud VM)
 - Minimum 8 CPUs, 32 GB RAM (for 2+ concurrent VMs with 4 vCPU / 8-16 GB each)
-- Fast storage for QEMU overlays (local SSD recommended for snapshot performance)
+- Fast storage for QEMU VM disks (SSD recommended for snapshot performance)
+- XFS filesystem with reflink support recommended for instant VM slot provisioning
+- `gsutil` installed if using GCS-based template distribution
 
 ## Filesystem layout
 
@@ -21,13 +23,17 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 | `{image_root}/cpu-free-YYYYMMDD.qcow2` | Versioned template qcow2 with pre-baked snapshot. Configured per image in `images.yaml`. |
 | `{task_data_root}/` | Task data mount point. Configured in `server.yaml`. |
 
-Example:
+Example (XFS setup — images and runtime on the same XFS disk for reflink):
 
 ```
-/home/user/agenthle-env-runtime/                          # runtime_root
-/home/user/agenthle-env-images/cpu-free/cpu-free-20260405.qcow2  # template qcow2
-/mnt/agenthle-task-data/                                  # task_data_root
+/mnt/xfs/                                                 # XFS disk with reflink=1
+/mnt/xfs/images/cpu-free/cpu-free-20260406.qcow2          # Windows template
+/mnt/xfs/images/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2  # Ubuntu template
+/mnt/xfs/runtime/                                         # runtime_root (slots go here)
+/mnt/agenthle-task-data/                                  # task_data_root (separate disk)
 ```
+
+When `gcs_uri` is configured in `images.yaml` and the template does not exist locally, the server automatically pulls it from GCS on first startup.
 
 ## Docker image
 
