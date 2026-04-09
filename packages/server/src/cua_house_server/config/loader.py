@@ -20,6 +20,7 @@ class LocalImageConfig:
     """Local QEMU runtime configuration for an image."""
 
     template_qcow2_path: Path
+    gcs_uri: str | None = None
     default_cpu_cores: int = 4
     default_memory_gb: int = 8
 
@@ -216,6 +217,7 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
             local_raw = spec["local"]
             local_cfg = LocalImageConfig(
                 template_qcow2_path=Path(local_raw.get("template_qcow2_path") or local_raw.get("golden_qcow2_path", "")),
+                gcs_uri=local_raw.get("gcs_uri"),
                 default_cpu_cores=int(local_raw.get("default_cpu_cores", 4)),
                 default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
             )
@@ -243,6 +245,7 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
             if runtime_mode == "local":
                 local_cfg = LocalImageConfig(
                     template_qcow2_path=Path(spec.get("template_qcow2_path") or spec.get("golden_qcow2_path", "")),
+                    gcs_uri=spec.get("gcs_uri"),
                     default_cpu_cores=int(spec.get("default_cpu_cores", 4)),
                     default_memory_gb=int(spec.get("default_memory_gb", 8)),
                 )

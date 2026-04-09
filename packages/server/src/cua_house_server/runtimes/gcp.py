@@ -326,59 +326,54 @@ class GCPVMRuntime:
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
+        os_type: str | None = None,
     ) -> StageResult:
-        """Control access to task data via NTFS ACLs on the data disk.
+        """Control access to task data via ACLs on the data disk.
 
-        Whitelist strategy (runs as User, no elevation needed):
+        Whitelist strategy:
         - runtime phase: enumerate the task directory and deny access to every
           subdirectory that is NOT input/, software/, or output/. Also deny all
           sibling task directories so the agent cannot peek at other tasks.
         - eval phase: remove the deny on reference/ so evaluator can read it.
+
+        Windows: NTFS ACLs via icacls.  Linux: chmod.
         """
         if task_data is None or not task_data.requires_task_data:
             return StageResult(skipped=True)
 
+        is_linux = os_type in ("linux", "ubuntu")
+        sep = "/" if is_linux else "\\"
         cua_url = self.cua_local_url(handle)
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)) as client:
             if phase == "runtime":
-                # Whitelist: only input/, software/, output/ are accessible
                 whitelist = set()
                 for d in (task_data.input_dir, task_data.software_dir, task_data.remote_output_dir):
                     if d:
-                        whitelist.add(d.rstrip("\\").rsplit("\\", 1)[-1].lower())
+                        whitelist.add(d.rstrip(sep).rsplit(sep, 1)[-1].lower())
 
-                task_dir = task_data.input_dir.rstrip("\\").rsplit("\\", 1)[0] if task_data.input_dir else None
+                task_dir = task_data.input_dir.rstrip(sep).rsplit(sep, 1)[0] if task_data.input_dir else None
                 if task_dir:
                     # 1. Deny non-whitelisted subdirs in task dir
-                    subdirs = await self._list_subdirs(client, cua_url, task_dir)
+                    subdirs = await self._list_subdirs(client, cua_url, task_dir, is_linux=is_linux)
                     for subdir in subdirs:
                         if subdir.lower() not in whitelist:
-                            await self._run_remote(
-                                client, cua_url,
-                                f'icacls "{task_dir}\\{subdir}" /deny User:(OI)(CI)F /Q',
-                            )
+                            await self._deny_dir(client, cua_url, f"{task_dir}{sep}{subdir}", is_linux=is_linux)
 
                     # 2. Deny sibling tasks in same category
-                    category_dir = task_dir.rsplit("\\", 1)[0]
-                    task_name = task_dir.rsplit("\\", 1)[-1]
-                    siblings = await self._list_subdirs(client, cua_url, category_dir)
+                    category_dir = task_dir.rsplit(sep, 1)[0]
+                    task_name = task_dir.rsplit(sep, 1)[-1]
+                    siblings = await self._list_subdirs(client, cua_url, category_dir, is_linux=is_linux)
                     for sibling in siblings:
                         if sibling != task_name:
-                            await self._run_remote(
-                                client, cua_url,
-                                f'icacls "{category_dir}\\{sibling}" /deny User:(OI)(CI)F /Q',
-                            )
+                            await self._deny_dir(client, cua_url, f"{category_dir}{sep}{sibling}", is_linux=is_linux)
 
                     # 3. Deny other categories
-                    data_root = category_dir.rsplit("\\", 1)[0]
-                    category_name = category_dir.rsplit("\\", 1)[-1]
-                    categories = await self._list_subdirs(client, cua_url, data_root)
+                    data_root = category_dir.rsplit(sep, 1)[0]
+                    category_name = category_dir.rsplit(sep, 1)[-1]
+                    categories = await self._list_subdirs(client, cua_url, data_root, is_linux=is_linux)
                     for cat in categories:
                         if cat != category_name:
-                            await self._run_remote(
-                                client, cua_url,
-                                f'icacls "{data_root}\\{cat}" /deny User:(OI)(CI)F /Q',
-                            )
+                            await self._deny_dir(client, cua_url, f"{data_root}{sep}{cat}", is_linux=is_linux)
 
                 self.event_logger.emit(
                     "task_data_acl_locked",
@@ -389,10 +384,7 @@ class GCPVMRuntime:
                 )
             else:  # eval
                 if task_data.reference_dir:
-                    await self._run_remote(
-                        client, cua_url,
-                        f'icacls "{task_data.reference_dir}" /remove:d User /Q',
-                    )
+                    await self._allow_dir(client, cua_url, task_data.reference_dir, is_linux=is_linux)
                     self.event_logger.emit(
                         "task_data_reference_unlocked",
                         lease_id=lease_id,
@@ -401,9 +393,29 @@ class GCPVMRuntime:
                     )
         return StageResult(file_count=0, bytes_staged=0)
 
-    async def _list_subdirs(self, client: httpx.AsyncClient, cua_url: str, path: str) -> list[str]:
-        """List subdirectory names using cmd dir (more reliable than PowerShell via CUA)."""
-        result = await self._run_remote(client, cua_url, f'dir "{path}" /AD /B')
+    async def _deny_dir(
+        self, client: httpx.AsyncClient, cua_url: str, path: str, *, is_linux: bool,
+    ) -> None:
+        if is_linux:
+            await self._run_remote(client, cua_url, f'chmod -R 000 "{path}"')
+        else:
+            await self._run_remote(client, cua_url, f'icacls "{path}" /deny User:(OI)(CI)F /Q')
+
+    async def _allow_dir(
+        self, client: httpx.AsyncClient, cua_url: str, path: str, *, is_linux: bool,
+    ) -> None:
+        if is_linux:
+            await self._run_remote(client, cua_url, f'chmod -R 755 "{path}"')
+        else:
+            await self._run_remote(client, cua_url, f'icacls "{path}" /remove:d User /Q')
+
+    async def _list_subdirs(
+        self, client: httpx.AsyncClient, cua_url: str, path: str, *, is_linux: bool = False,
+    ) -> list[str]:
+        if is_linux:
+            result = await self._run_remote(client, cua_url, f'ls -1 "{path}" 2>/dev/null')
+        else:
+            result = await self._run_remote(client, cua_url, f'dir "{path}" /AD /B')
         stdout = (result.get("stdout", "") or "").strip()
         if not stdout or result.get("return_code", 1) != 0:
             return []
