@@ -2,17 +2,18 @@
 
 How to update the Windows VM images used by cua-house. There are two image types with different workflows.
 
-## Current local images (kvm0)
+## Current local images
 
-| Image key | qcow2 file | GCP source snapshot | Date | Description |
-|-----------|-----------|---------------------|------|-------------|
-| `cpu-free` | `cpu-free-20260406.qcow2` | `agenthle-dev-cpu-free-export-20260406` | 2026-04-06 | **Active** — Bridge update: MCP action tools text-only, OpenClaw plugin synced. Auto-snapshot by cua-house server. |
-| `cpu-free` | `golden.qcow2` | `agenthle-dev-cpu-free-agents-baked-20260405` | 2026-04-05 | Previous — External agents baked (Node.js 24.12, Claude Code, Codex, OpenClaw, MCP Server, CUA Plugin) |
-| `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `agenthle-ubuntu-agents-baked-20260408` | 2026-04-08 | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). |
-| `waa` | `waa-20260408.qcow2` | GCP image export (2026-04-09) | 2026-04-08 | **Active** (kvm-02 only) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QMP `savevm` on kvm-02. |
-| `cpu-license` | `golden.qcow2` | `agenthle-dev-cpu-licensed-agents-baked-20260405` | 2026-04-05 | Not yet updated with bridge changes |
+| Image key | qcow2 file | GCS object (baked) | Bake date | Description |
+|-----------|-----------|--------------------|-----------|-------------|
+| `cpu-free` | `cpu-free-20260406.qcow2` | `gs://agenthle-images/templates/cpu-free/cpu-free-20260406.qcow2` | 2026-04-06 | Bridge update: MCP action tools text-only, OpenClaw plugin synced. kvm0 only (not loaded into any active vm_pool). |
+| `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2` | 2026-04-09 (re-bake w/ cifs-utils) | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). Re-baked on kvm-02 after the original 2026-04-08 19:33 bake was found to be missing `cifs-utils` (pitfall #13). |
+| `waa` | `waa-20260408.qcow2` | `gs://agenthle-images/templates/waa/waa-20260408.qcow2` | 2026-04-10 | **Active** (kvm-02) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QEMU monitor `savevm` on kvm-02. |
+| `cpu-license` | `cpu-license-20260405.qcow2` | *(not uploaded)* | 2026-04-05 | Not yet updated with bridge changes. kvm0 only. |
 
-> Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.69.191.152).
+> **Source of truth for local templates is GCS**, not any particular KVM host. The cua-house-server's `_ensure_local_templates()` auto-pulls from the `gcs_uri` in `images.yaml` on first startup, so any new node gets the current baked version for free. After **any** local re-bake, you MUST upload the new qcow2 back to GCS (`gsutil cp ...`) or future nodes will pull a stale version and either fail `-loadvm` or hit already-fixed guest-side bugs.
+>
+> Images are mirrored on `/mnt/xfs/images/{image_key}/` (kvm-02, XFS+reflink) and `/home/weichenzhang/agenthle-env-images/{image_key}/` (kvm0, legacy — being phased out).
 
 ---
 
@@ -205,6 +206,27 @@ qemu-img snapshot -l $QCOW2
 # Should show:    ID  TAG              VM SIZE  DATE         VM CLOCK
 #                  1  cpu-free         ...      ...          ...
 ```
+
+### Step 5b: Upload baked qcow2 back to GCS (REQUIRED)
+
+**Always** push the baked qcow2 back to GCS. Skipping this step means the
+`gcs_uri` configured in `images.yaml` no longer matches what's on disk, and
+any future node that pulls the template will get a stale version — either
+missing a savevm tag (pool init fails with "Snapshot does not exist") or
+missing a guest-side fix that was added in the local re-bake (e.g. the
+`cifs-utils` pitfall #13 drift we hit with `cpu-free-ubuntu-20260408`).
+
+```bash
+gsutil -o GSUtil:parallel_composite_upload_threshold=150M \
+    cp $QCOW2 gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+
+# Sanity: confirm Content-Length matches the local file
+gsutil stat gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2 | grep Content-Length
+stat -c '%s' $QCOW2
+```
+
+Then update the **Current local images** table at the top of this doc with
+the new bake date so other operators know what's in GCS.
 
 ### Step 6: Register and switch
 

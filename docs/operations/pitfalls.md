@@ -117,6 +117,17 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 ## Image Baking
 
+### 11a. Local qcow2 drifts from GCS after a re-bake
+
+**Symptom**: New KVM node pool init fails with `Snapshot 'X' does not exist in one or more devices`, OR Linux task data staging fails with `mount.cifs: command not found` even though the fix was already added to the local template. Inspecting the qcow2 on the broken node shows an older bake timestamp than the known-good node.
+
+**Root cause**: `_ensure_local_templates()` pulls the template from the `gcs_uri` configured in `images.yaml`. When someone re-bakes a template locally (e.g. to fix a guest-side bug like `cifs-utils`) and forgets to `gsutil cp` the result back to GCS, the local disk on one host diverges from GCS. Future nodes pull the stale GCS version. Hit in practice:
+
+- `waa-20260408.qcow2`: uploaded to GCS as raw GCP export, baked locally on kvm-02 only. Fixed in the initial `waa` deployment (commit 07dfaf6).
+- `cpu-free-ubuntu-20260408.qcow2`: first bake on 2026-04-08 19:33 (no cifs-utils) went to GCS. Re-bake on 2026-04-09 05:50 (with cifs-utils) stayed on kvm-02 only for ~18 hours.
+
+**Fix**: Treat GCS as the **source of truth** for baked templates. After any local re-bake, immediately `gsutil cp` the new qcow2 back to the same `gcs_uri`. The updated Step 5b in `docs/operations/vm-image-maintenance.md` makes this part of the bake workflow. When debugging "works on node A, fails on node B", compare `gsutil stat` Content-Length and local `stat -c %s`: any mismatch means drift.
+
 ### 11. Snapshot guest IP is frozen at bake time
 
 **Symptom**: After re-baking a snapshot on a different host, VMs fail to connect because the guest IP changed.
