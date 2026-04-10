@@ -326,7 +326,7 @@ class GCPVMRuntime:
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
-        os_type: str | None = None,
+        os_family: str | None = None,
     ) -> StageResult:
         """Control access to task data via ACLs on the data disk.
 
@@ -341,7 +341,7 @@ class GCPVMRuntime:
         if task_data is None or not task_data.requires_task_data:
             return StageResult(skipped=True)
 
-        is_linux = os_type in ("linux", "ubuntu")
+        is_linux = os_family == "linux"
         sep = "/" if is_linux else "\\"
         cua_url = self.cua_local_url(handle)
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)) as client:

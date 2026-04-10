@@ -2,6 +2,6 @@
 
 __version__ = "0.1.1"
 
-from cua_house_client.client import EnvServerClient
+from cua_house_client.client import AcquiredLease, EnvServerClient
 
-__all__ = ["EnvServerClient"]
+__all__ = ["AcquiredLease", "EnvServerClient"]

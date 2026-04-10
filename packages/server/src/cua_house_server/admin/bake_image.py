@@ -116,7 +116,7 @@ class BakeLease:
     task_id: str
     lease_id: str
     slot_id: str
-    cua_url: str
+    cua_url: str  # primary CUA service URL (from urls[5000] in assignment)
 
 
 class BakeVm:
@@ -321,7 +321,7 @@ def allocate_bake_lease(
                 task_id=task_id,
                 lease_id=assignment["lease_id"],
                 slot_id=assignment["slot_id"],
-                cua_url=assignment["cua_url"],
+                cua_url=assignment["urls"].get("5000") or assignment["urls"].get(5000, ""),
             ),
             heartbeats,
         )
@@ -681,7 +681,7 @@ def main() -> int:
         "task_id": lease.task_id,
         "lease_id": lease.lease_id,
         "slot_id": lease.slot_id,
-        "cua_url": lease.cua_url,
+        "urls": {"5000": lease.cua_url},
         "image_key": args.image_key,
     }
 

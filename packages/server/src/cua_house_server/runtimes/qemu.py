@@ -30,7 +30,8 @@ class VMHandle:
     snapshot_name: str
     cpu_cores: int
     memory_gb: int
-    cua_port: int
+    # guest_port → host_loopback_port for every port in the image's published_ports.
+    published_ports: dict[int, int]
     novnc_port: int
     storage_dir: Path
     logs_dir: Path
@@ -69,7 +70,9 @@ class DockerQemuRuntime:
         return self.config.runtime_root / "slots"
 
     async def wait_ready(self, handle: VMHandle) -> None:
-        url = f"http://127.0.0.1:{handle.cua_port}/status"
+        # Probe the first published port for /status readiness.
+        primary_port = next(iter(handle.published_ports.values()))
+        url = f"http://127.0.0.1:{primary_port}/status"
         deadline = asyncio.get_running_loop().time() + self.config.ready_timeout_s
         last_error: str | None = None
         async with httpx.AsyncClient(timeout=10) as client:
@@ -213,10 +216,10 @@ class DockerQemuRuntime:
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
-        os_type: str | None = None,
+        os_family: str | None = None,
     ) -> StageResult:
         cname = container_name or handle.container_name
-        cua_url = self.vm_cua_local_url(handle)
+        cua_url = self.vm_published_url(handle, next(iter(handle.published_ports)))
         return await self.task_data.stage_phase(
             lease_id=lease_id,
             task_id=task_id,
@@ -225,7 +228,7 @@ class DockerQemuRuntime:
             phase=phase,
             container_name=cname,
             vm_pool=True,
-            os_type=os_type,
+            os_family=os_family,
         )
 
     # -- VM pool (snapshot-based persistent VMs) -----------------------
@@ -245,7 +248,7 @@ class DockerQemuRuntime:
 
         from cua_house_server._internal.port_pool import PortPool
 
-        cua_ports = PortPool(*self.config.cua_port_range)
+        published_port_pool = PortPool(*self.config.published_port_range)
         novnc_ports = PortPool(*self.config.novnc_port_range)
 
         # Ensure template qcow2 files exist locally (pull from GCS if needed)
@@ -261,14 +264,18 @@ class DockerQemuRuntime:
                 continue
             for _ in range(entry.count):
                 vm_id = str(uuid4())
-                cua_port = cua_ports.allocate()
+                # Allocate one host loopback port per declared guest port
+                published_ports = {
+                    guest_port: published_port_pool.allocate()
+                    for guest_port in image.published_ports
+                }
                 novnc_port = novnc_ports.allocate()
                 prepare_args.append(dict(
                     vm_id=vm_id,
                     image=image,
                     cpu_cores=entry.cpu_cores,
                     memory_gb=entry.memory_gb,
-                    cua_port=cua_port,
+                    published_ports=published_ports,
                     novnc_port=novnc_port,
                     snapshot_name=entry.snapshot_name,
                 ))
@@ -362,7 +369,7 @@ class DockerQemuRuntime:
         image: ImageSpec,
         cpu_cores: int,
         memory_gb: int,
-        cua_port: int,
+        published_ports: dict[int, int],
         novnc_port: int,
         snapshot_name: str,
     ) -> VMHandle:
@@ -391,7 +398,7 @@ class DockerQemuRuntime:
             snapshot_name=snapshot_name,
             cpu_cores=cpu_cores,
             memory_gb=memory_gb,
-            cua_port=cua_port,
+            published_ports=published_ports,
             novnc_port=novnc_port,
             storage_dir=storage_dir,
             logs_dir=logs_dir,
@@ -423,8 +430,14 @@ class DockerQemuRuntime:
             "-v", f"{self.config.task_data_root}:/shared/agenthle:rw",
             # Patched boot.sh: converts pflash vars to qcow2 + loadvm support
             "-v", f"{patched_boot}:/run/boot.sh:ro",
-            "-p", f"127.0.0.1:{handle.cua_port}:5000",
+            # noVNC is a container-side service (always port 8006 inside the container)
             "-p", f"127.0.0.1:{handle.novnc_port}:8006",
+        ]
+        # Published guest ports: bridge-mode iptables DNAT forwards container
+        # traffic → guest VM IP automatically, so docker -p is sufficient.
+        for guest_port, host_port in handle.published_ports.items():
+            cmd.extend(["-p", f"127.0.0.1:{host_port}:{guest_port}"])
+        cmd.extend([
             "-e", f"RAM_SIZE={handle.memory_gb}G",
             "-e", f"CPU_CORES={handle.cpu_cores}",
             # Snapshot-compatible CPU settings
@@ -437,7 +450,7 @@ class DockerQemuRuntime:
             # Load the pre-baked snapshot on QEMU start (skips Windows cold boot)
             "-e", f"LOADVM_SNAPSHOT={handle.snapshot_name}",
             self.config.docker_image,
-        ]
+        ])
 
         log_path = handle.logs_dir / "docker.log"
         self.event_logger.emit(
@@ -577,7 +590,8 @@ class DockerQemuRuntime:
 
     async def _wait_cua_ready(self, handle: VMHandle, timeout: float = 30) -> None:
         """Poll CUA /status until 200.  Used after loadvm (short timeout)."""
-        url = f"http://127.0.0.1:{handle.cua_port}/status"
+        primary_port = next(iter(handle.published_ports.values()))
+        url = f"http://127.0.0.1:{primary_port}/status"
         deadline = asyncio.get_running_loop().time() + timeout
         async with httpx.AsyncClient(timeout=10) as client:
             while asyncio.get_running_loop().time() < deadline:
@@ -605,7 +619,7 @@ class DockerQemuRuntime:
             image=image,
             cpu_cores=handle.cpu_cores,
             memory_gb=handle.memory_gb,
-            cua_port=handle.cua_port,
+            published_ports=handle.published_ports,
             novnc_port=handle.novnc_port,
             snapshot_name=handle.snapshot_name,
         )
@@ -614,8 +628,9 @@ class DockerQemuRuntime:
         new_handle.qmp = QMPClient(new_handle.container_name)
         return new_handle
 
-    def vm_cua_local_url(self, handle: VMHandle) -> str:
-        return f"http://127.0.0.1:{handle.cua_port}"
+    def vm_published_url(self, handle: VMHandle, guest_port: int) -> str:
+        host_port = handle.published_ports[guest_port]
+        return f"http://127.0.0.1:{host_port}"
 
     def vm_novnc_local_url(self, handle: VMHandle) -> str:
         return f"http://127.0.0.1:{handle.novnc_port}"

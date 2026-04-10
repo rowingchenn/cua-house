@@ -32,9 +32,8 @@ class VMRecord(BaseModel):
     cpu_cores: int
     memory_gb: int
     container_name: str
-    cua_port: int
-    novnc_port: int
-    qmp_port: int
+    published_ports: dict[int, int] = Field(default_factory=dict)
+    novnc_port: int = 0
     lease_id: str | None = None
     task_id: str | None = None
     last_used_at: datetime = Field(default_factory=utcnow)

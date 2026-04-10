@@ -19,20 +19,36 @@ def _get_token(request: Request) -> str | None:
     return request.app.state.auth_token
 
 
-def _lease_host(scheduler: EnvScheduler, lease_id: str) -> str:
-    return f"lease-{lease_id}.{scheduler.host_config.public_base_host}"
+def _external_url(request: Request, scheduler: EnvScheduler, lease_id: str, *, service: str) -> str:
+    """Build a public-facing URL for a lease's published service.
 
-
-def _external_url(request: Request, scheduler: EnvScheduler, lease_id: str, *, novnc: bool) -> str:
+    ``service`` is ``"novnc"`` or a numeric port string (e.g. ``"5000"``).
+    The subdomain is ``<service>--<lease_id>.<public_base_host>``.
+    """
     scheme = request.url.scheme
-    host = _lease_host(scheduler, lease_id)
+    host = f"{service}--{lease_id}.{scheduler.host_config.public_base_host}"
     port = request.url.port
     if port is None:
         default_port = 443 if scheme == "https" else 80
         port = default_port
     hostport = host if (scheme == "http" and port == 80) or (scheme == "https" and port == 443) else f"{host}:{port}"
-    suffix = "/novnc/" if novnc else ""
+    suffix = "/novnc/" if service == "novnc" else ""
     return f"{scheme}://{hostport}{suffix}"
+
+
+def _rewrite_assignment_urls(request: Request, scheduler: EnvScheduler, task) -> None:
+    """Overwrite local loopback URLs with public external URLs."""
+    if task.assignment is None:
+        return
+    lease_id = task.assignment.lease_id
+    # Rebuild urls dict: each guest port → external proxy URL
+    image = scheduler.images.get(task.snapshot_name)
+    if image is not None:
+        task.assignment.urls = {
+            port: _external_url(request, scheduler, lease_id, service=str(port))
+            for port in image.published_ports
+        }
+    task.assignment.novnc_url = _external_url(request, scheduler, lease_id, service="novnc")
 
 
 async def _present_task(request: Request, scheduler: EnvScheduler, task_id: str):
@@ -40,9 +56,7 @@ async def _present_task(request: Request, scheduler: EnvScheduler, task_id: str)
         task = await scheduler.get_task(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if task.assignment is not None:
-        task.assignment.cua_url = _external_url(request, scheduler, task.assignment.lease_id, novnc=False)
-        task.assignment.novnc_url = _external_url(request, scheduler, task.assignment.lease_id, novnc=True)
+    _rewrite_assignment_urls(request, scheduler, task)
     return task
 
 
@@ -52,16 +66,15 @@ async def _present_batch(request: Request, scheduler: EnvScheduler, batch_id: st
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     for task in batch.tasks:
-        if task.assignment is not None:
-            task.assignment.cua_url = _external_url(request, scheduler, task.assignment.lease_id, novnc=False)
-            task.assignment.novnc_url = _external_url(request, scheduler, task.assignment.lease_id, novnc=True)
+        _rewrite_assignment_urls(request, scheduler, task)
     return batch
 
 
 @router.get("/healthz")
-async def healthz(request: Request, authorization: str | None = Header(default=None)) -> dict[str, str]:
+async def healthz(request: Request, authorization: str | None = Header(default=None)):
     require_auth(authorization, expected_token=_get_token(request))
-    return {"status": "ok"}
+    sched = _get_scheduler(request)
+    return {"status": "ok", "heartbeat_ttl_s": sched.host_config.heartbeat_ttl_s}
 
 
 @router.get("/v1/vms")

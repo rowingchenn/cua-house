@@ -15,6 +15,15 @@ from cua_house_common.models import VMPoolEntry
 logger = logging.getLogger(__name__)
 
 
+# Ports reserved by the dockur container infrastructure (VNC, monitor, web,
+# websockets). The dockur bridge-mode iptables DNAT rule excludes these from
+# guest forwarding (see network.sh `getHostPorts`), so they cannot be used as
+# `published_ports` — guest traffic on these ports would never reach the VM.
+RESERVED_DOCKUR_PORTS: frozenset[int] = frozenset({5900, 5700, 7100, 8004, 8006})
+
+VALID_OS_FAMILIES: frozenset[str] = frozenset({"windows", "linux"})
+
+
 @dataclass(slots=True)
 class LocalImageConfig:
     """Local QEMU runtime configuration for an image."""
@@ -51,14 +60,20 @@ class ImageSpec:
     At least one of ``local`` or ``gcp`` must be set.  The scheduler
     picks the runtime based on which sub-configs are present and which
     runtimes the server has available.
+
+    `os_family` and `published_ports` are required image-static facts. They
+    live at the top level (not under `local:`/`gcp:`) because they describe
+    the guest VM, not the runtime that hosts it.
     """
 
     key: str
     enabled: bool
+    os_family: str
+    published_ports: tuple[int, ...]
     local: LocalImageConfig | None = None
     gcp: GCPImageConfig | None = None
 
-    # --- Backwards-compatible helpers ---
+    # --- Convenience helpers ---
 
     @property
     def runtime_mode(self) -> str:
@@ -157,7 +172,12 @@ class HostRuntimeConfig:
     ready_timeout_s: int
     readiness_poll_interval_s: float
     idle_slot_ttl_s: int
-    cua_port_range: tuple[int, int]
+    # Single host-loopback port pool used for ALL guest ports an image declares
+    # in `published_ports`. Each VM consumes len(published_ports) ports from
+    # this range. Pick a range large enough for max_vms × max_ports_per_image.
+    published_port_range: tuple[int, int]
+    # Separate pool for the noVNC container service (one per VM, always 8006
+    # inside the container).
     novnc_port_range: tuple[int, int]
     # VM pool (snapshot-based local runtime)
     vm_pool: list[VMPoolEntry] = field(default_factory=list)
@@ -193,7 +213,7 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         ready_timeout_s=int(raw.get("ready_timeout_s", 900)),
         readiness_poll_interval_s=float(raw.get("readiness_poll_interval_s", 5)),
         idle_slot_ttl_s=int(raw.get("idle_slot_ttl_s", 300)),
-        cua_port_range=tuple(raw.get("cua_port_range", [15000, 15999])),
+        published_port_range=tuple(raw.get("published_port_range", [16000, 16999])),
         novnc_port_range=tuple(raw.get("novnc_port_range", [18000, 18999])),
         vm_pool=[
             VMPoolEntry(**entry) for entry in raw.get("vm_pool", [])
@@ -209,14 +229,39 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
     images = raw.get("images", {})
     catalog: dict[str, ImageSpec] = {}
     for key, spec in images.items():
+        enabled = bool(spec.get("enabled", False))
+
+        # os_family + published_ports — required for all images
+        os_family = spec.get("os_family", "")
+        if enabled and os_family not in VALID_OS_FAMILIES:
+            raise ValueError(
+                f"image '{key}': os_family must be one of {sorted(VALID_OS_FAMILIES)}, got {os_family!r}"
+            )
+        os_family = os_family or "windows"  # harmless default for disabled images
+
+        raw_ports = spec.get("published_ports", [])
+        if enabled and not raw_ports:
+            raise ValueError(f"image '{key}': published_ports is required (non-empty list[int])")
+        published_ports = tuple(int(p) for p in raw_ports) if raw_ports else (5000,)
+        if enabled:
+            for port in published_ports:
+                if not (1 <= port <= 65535):
+                    raise ValueError(f"image '{key}': invalid port {port}")
+                if port in RESERVED_DOCKUR_PORTS:
+                    raise ValueError(
+                        f"image '{key}': port {port} is reserved by dockur (HOST_PORTS). "
+                        f"Reserved set: {sorted(RESERVED_DOCKUR_PORTS)}"
+                    )
+            if len(published_ports) != len(set(published_ports)):
+                raise ValueError(f"image '{key}': duplicate entries in published_ports")
+
         local_cfg = None
         gcp_cfg = None
 
-        # New nested format: local: {...}, gcp: {...}
         if "local" in spec:
             local_raw = spec["local"]
             local_cfg = LocalImageConfig(
-                template_qcow2_path=Path(local_raw.get("template_qcow2_path") or local_raw.get("golden_qcow2_path", "")),
+                template_qcow2_path=Path(local_raw.get("template_qcow2_path") or ""),
                 gcs_uri=local_raw.get("gcs_uri"),
                 default_cpu_cores=int(local_raw.get("default_cpu_cores", 4)),
                 default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
@@ -239,36 +284,11 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
                 max_concurrent_vms=int(gcp_raw.get("max_concurrent_vms", 4)),
             )
 
-        # Legacy flat format: runtime_mode + top-level fields
-        if local_cfg is None and gcp_cfg is None:
-            runtime_mode = spec.get("runtime_mode", "local")
-            if runtime_mode == "local":
-                local_cfg = LocalImageConfig(
-                    template_qcow2_path=Path(spec.get("template_qcow2_path") or spec.get("golden_qcow2_path", "")),
-                    gcs_uri=spec.get("gcs_uri"),
-                    default_cpu_cores=int(spec.get("default_cpu_cores", 4)),
-                    default_memory_gb=int(spec.get("default_memory_gb", 8)),
-                )
-            elif runtime_mode == "gcp":
-                gcp_cfg = GCPImageConfig(
-                    project=spec.get("gcp_project", ""),
-                    zone=spec.get("gcp_zone", ""),
-                    network=spec.get("gcp_network", ""),
-                    service_account=spec.get("gcp_service_account", ""),
-                    boot_image=spec.get("gcp_boot_image"),
-                    boot_snapshot=spec.get("gcp_boot_snapshot"),
-                    boot_disk_gb=int(spec.get("gcp_boot_disk_gb", 64)),
-                    data_snapshot=spec.get("gcp_data_snapshot"),
-                    data_disk_gb=int(spec.get("gcp_data_disk_gb", 200)),
-                    gpu_type=spec.get("gpu_type"),
-                    gpu_count=int(spec.get("gpu_count", 0)),
-                    default_machine_type=spec.get("gcp_machine_type", "e2-standard-2"),
-                    max_concurrent_vms=int(spec.get("max_concurrent_vms", 4)),
-                )
-
         catalog[key] = ImageSpec(
             key=key,
-            enabled=bool(spec.get("enabled", False)),
+            enabled=enabled,
+            os_family=os_family,
+            published_ports=published_ports,
             local=local_cfg,
             gcp=gcp_cfg,
         )

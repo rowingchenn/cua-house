@@ -49,9 +49,10 @@ readiness_poll_interval_s: 5
 # How long an idle slot is kept before cleanup (legacy mode).
 idle_slot_ttl_s: 300
 
-# Port ranges for CUA and noVNC endpoints (bind to 127.0.0.1).
-# Each VM uses one port from each range.
-cua_port_range: [15000, 15999]
+# Port ranges for published guest ports and noVNC (bind to 127.0.0.1).
+# Each VM uses len(image.published_ports) ports from published_port_range
+# and one port from novnc_port_range.
+published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
 
 # VM pool: snapshot-based persistent VMs (local runtime only).

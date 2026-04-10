@@ -41,8 +41,8 @@ class RuntimeBackend(Protocol):
         """Reset/destroy a slot after task completion."""
         ...
 
-    def cua_local_url(self, handle: Any) -> str:
-        """Return the local CUA server URL for a slot."""
+    def vm_published_url(self, handle: Any, guest_port: int) -> str:
+        """Return the local URL for a specific published guest port."""
         ...
 
     def novnc_local_url(self, handle: Any) -> str:
@@ -67,7 +67,7 @@ class RuntimeBackend(Protocol):
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: str,
         container_name: str | None = None,
-        os_type: str | None = None,
+        os_family: str | None = None,
     ) -> StageResult:
         """Stage task data into the guest for a given phase."""
         ...

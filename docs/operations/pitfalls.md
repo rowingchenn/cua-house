@@ -142,13 +142,17 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 ## Task Data Staging
 
-### 12. Staging runs Windows commands on Linux VMs when `os_type` is missing
+### 12. Staging runs Windows commands on Linux VMs (fixed)
 
-**Symptom**: Task staging "succeeds" in ~0.3s but data is not mounted. Task's `start()` fails with "Permission denied" or "file not found" at `/media/user/data/agenthle/...`.
+**Status**: Fixed. `os_family` is now a required field in `images.yaml` (per image). The server reads it from the catalog — no client-side `os_type` field, no string-match inference.
 
-**Root cause**: Client doesn't send `os_type` in `TaskRequirement`. Server defaults to `None`, which takes the Windows staging path (PowerShell, `net use E:`, `icacls`). On a Linux VM, these commands fail silently via the CUA API. `_mount_data_linux()` is never called.
+### 12a. Reserved dockur ports cannot be used in `published_ports`
 
-**Fix**: Server-side inference in `scheduler/core.py` `_stage_phase()`: if `os_type is None` and snapshot_name contains "ubuntu" or "linux", default to `"linux"`.
+**Symptom**: `load_image_catalog` raises `ValueError: port N is reserved by dockur`.
+
+**Root cause**: Ports 5900 (VNC), 5700 (WSS), 7100 (monitor), 8004 (WSD), 8006 (noVNC web) are used by dockur's own services inside the container. The bridge-mode iptables DNAT rule in `network.sh` excludes these ports from guest forwarding. If you declare one of them in `published_ports`, guest traffic would go to the container service instead of the VM.
+
+**Fix**: Choose a different guest port. If your guest service runs on a reserved port, reconfigure it to use an unreserved one.
 
 ### 13. Ubuntu snapshot must have `cifs-utils` for CIFS data mount
 

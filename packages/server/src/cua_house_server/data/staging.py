@@ -88,7 +88,7 @@ class TaskDataManager:
         phase: PhaseName,
         container_name: str | None = None,
         vm_pool: bool = False,
-        os_type: str | None = None,
+        os_family: str | None = None,
     ) -> StageResult:
         if task_data is None or not task_data.requires_task_data:
             return StageResult(skipped=True)
@@ -110,7 +110,7 @@ class TaskDataManager:
                     cua_url=cua_url,
                     task_data=task_data,
                     phase=phase,
-                    os_type=os_type,
+                    os_family=os_family,
                 )
             else:
                 result = await self._stage_samba(
@@ -155,14 +155,14 @@ class TaskDataManager:
         cua_url: str,
         task_data: TaskRequirement.TaskDataRequest,
         phase: PhaseName,
-        os_type: str | None = None,
+        os_family: str | None = None,
     ) -> StageResult:
         """Stage task data for VM-pool VMs.
 
         Windows: E: drive mapping via Samba + NTFS ACLs (icacls).
         Linux: CIFS mount at /media/user/data/agenthle + chmod.
         """
-        is_linux = os_type in ("linux", "ubuntu")
+        is_linux = os_family == "linux"
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)) as client:
             if phase == "runtime":
                 if is_linux:

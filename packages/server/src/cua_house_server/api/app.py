@@ -17,7 +17,7 @@ from cua_house_server.scheduler.core import EnvScheduler
 from cua_house_common.events import JsonlEventLogger
 
 from cua_house_server.api.routes import router as api_router
-from cua_house_server.api.proxy import lease_id_from_host, proxy_http_handler, proxy_websocket_handler
+from cua_house_server.api.proxy import parse_proxy_host, proxy_http_handler, proxy_websocket_handler
 
 logger = logging.getLogger(__name__)
 
@@ -75,23 +75,25 @@ def create_app(*, host_config_path: str | Path, image_catalog_path: str | Path) 
     # Register proxy catch-all routes (must be last)
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
     async def proxy_http(request: Request, path: str):
-        lease_id = lease_id_from_host(
+        parsed = parse_proxy_host(
             request.headers.get("host"),
-            public_base_host=scheduler.host_config.public_base_host,
+            base_host=scheduler.host_config.public_base_host,
         )
-        if lease_id is None:
+        if parsed is None:
             raise HTTPException(status_code=404, detail="not found")
-        return await proxy_http_handler(request, lease_id, novnc=request.url.path.startswith("/novnc"))
+        service, lease_id = parsed
+        return await proxy_http_handler(request, lease_id, service)
 
     @app.websocket("/{path:path}")
     async def proxy_websocket(websocket: WebSocket, path: str):
-        lease_id = lease_id_from_host(
+        parsed = parse_proxy_host(
             websocket.headers.get("host"),
-            public_base_host=scheduler.host_config.public_base_host,
+            base_host=scheduler.host_config.public_base_host,
         )
-        if lease_id is None:
+        if parsed is None:
             await websocket.close(code=1008)
             return
-        await proxy_websocket_handler(websocket, lease_id, novnc=websocket.url.path.startswith("/novnc"))
+        service, lease_id = parsed
+        await proxy_websocket_handler(websocket, lease_id, service)
 
     return app

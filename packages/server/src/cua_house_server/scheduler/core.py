@@ -59,7 +59,7 @@ class EnvScheduler:
         self._batches: dict[str, BatchStatus] = {}
         self._batch_expires_at: dict[str, Any] = {}
         self._leases: dict[str, LeaseRecord] = {}
-        self._cua_ports = PortPool(*host_config.cua_port_range)
+        self._published_port_pool = PortPool(*host_config.published_port_range)
         self._novnc_ports = PortPool(*host_config.novnc_port_range)
         self._dispatch_task: asyncio.Task[None] | None = None
         self._lease_reaper_task: asyncio.Task[None] | None = None
@@ -98,9 +98,8 @@ class EnvScheduler:
                     cpu_cores=handle.cpu_cores,
                     memory_gb=handle.memory_gb,
                     container_name=handle.container_name,
-                    cua_port=handle.cua_port,
+                    published_ports=handle.published_ports,
                     novnc_port=handle.novnc_port,
-                    qmp_port=0,
                 )
                 self._vms[vm.vm_id] = vm
                 self._vm_handles[vm.vm_id] = handle
@@ -126,11 +125,12 @@ class EnvScheduler:
                 raise ValueError(f"batch_id already exists: {batch_id}")
             tasks: list[TaskStatus] = []
             for req in request.tasks:
+                if req.task_id in self._tasks:
+                    raise ValueError(f"task_id already exists: {req.task_id}")
                 cpu_cores, memory_gb = self._resolve_resources(req.snapshot_name, req.machine_type)
                 task = TaskStatus(
                     task_id=req.task_id,
                     task_path=req.task_path,
-                    os_type=req.os_type,
                     snapshot_name=req.snapshot_name,
                     machine_type=req.machine_type,
                     cpu_cores=cpu_cores,
@@ -175,7 +175,6 @@ class EnvScheduler:
                         "task_capacity_rejected",
                         batch_id=batch_id,
                         task_id=task.task_id,
-                        os_type=task.os_type,
                         snapshot_name=task.snapshot_name,
                         cpu_cores=task.cpu_cores,
                         memory_gb=task.memory_gb,
@@ -186,7 +185,6 @@ class EnvScheduler:
                         "task_queued",
                         batch_id=batch_id,
                         task_id=task.task_id,
-                        os_type=task.os_type,
                         snapshot_name=task.snapshot_name,
                         machine_type=task.machine_type,
                         cpu_cores=task.cpu_cores,
@@ -328,10 +326,9 @@ class EnvScheduler:
             task_data = task.task_data
             runtime_mode = self._lease_runtime.get(lease_id, "local")
 
-        # Infer os_type from snapshot_name if client didn't send it
-        os_type = task.os_type
-        if os_type is None and ("ubuntu" in task.snapshot_name or "linux" in task.snapshot_name):
-            os_type = "linux"
+        # os_family is an image-static property from the catalog — no inference.
+        image = self.images.get(task.snapshot_name)
+        os_family = image.os_family if image else "windows"
 
         if runtime_mode == "gcp":
             gcp_handle = self._gcp_handles.get(lease_id)
@@ -340,14 +337,13 @@ class EnvScheduler:
             gcp_rt = self._runtimes.get("gcp")
             if not isinstance(gcp_rt, GCPVMRuntime):
                 return LeaseStageResponse(lease_id=lease_id, task_id=task.task_id, phase=phase, skipped=True)
-            image = self._resolve_image(task.snapshot_name)
             result = await gcp_rt.stage_task_phase(
                 handle=gcp_handle,
                 task_id=task.task_id,
                 lease_id=lease_id,
                 task_data=task_data,
                 phase=phase,
-                os_type=os_type,
+                os_family=os_family,
             )
         else:
             vm_handle = self._vm_handles[lease.slot_id]
@@ -358,7 +354,7 @@ class EnvScheduler:
                 task_data=task_data,
                 phase=phase,
                 container_name=vm_handle.container_name,
-                os_type=os_type,
+                os_family=os_family,
             )
         return LeaseStageResponse(
             lease_id=lease_id,
@@ -589,17 +585,25 @@ class EnvScheduler:
         self._lease_runtime[lease.lease_id] = "local"
         vm.lease_id = lease.lease_id
 
+        # Build per-port local URLs (overwritten by routes.py _present_* with external URLs)
+        vm_handle = self._vm_handles.get(vm.vm_id)
+        urls: dict[int, str] = {}
+        novnc_url: str | None = None
+        if vm_handle is not None:
+            urls = {
+                guest_port: self.runtime.vm_published_url(vm_handle, guest_port)
+                for guest_port in vm_handle.published_ports
+            }
+            novnc_url = self.runtime.vm_novnc_local_url(vm_handle)
+
         assignment = TaskAssignment(
             host_id=self.host_config.host_id,
             lease_id=lease.lease_id,
             slot_id=vm.vm_id,
             snapshot_name=candidate.snapshot_name,
+            urls=urls,
+            novnc_url=novnc_url,
         )
-        # Populate CUA/noVNC URLs for local VMs
-        vm_handle = self._vm_handles.get(vm.vm_id)
-        if vm_handle is not None:
-            assignment.cua_url = self.runtime.vm_cua_local_url(vm_handle)
-            assignment.novnc_url = self.runtime.vm_novnc_local_url(vm_handle)
 
         candidate.lease_id = lease.lease_id
         candidate.assignment = assignment
@@ -645,7 +649,7 @@ class EnvScheduler:
                 image=image,
                 cpu_cores=image.default_cpu_cores,
                 memory_gb=image.default_memory_gb,
-                cua_port=5000,
+                cua_port=5000,  # TODO multi-port GCP
                 novnc_port=0,
                 lease_id=lease_id,
                 task_id=task_id,
@@ -656,8 +660,9 @@ class EnvScheduler:
                         handle.vm_name, task_id, machine_type or image.gcp_machine_type)
             await gcp_rt.start_slot(handle)
 
-            cua_url = gcp_rt.cua_local_url(handle)
-            novnc_url = gcp_rt.novnc_local_url(handle)
+            # TODO multi-port GCP: build urls from image.published_ports
+            gcp_cua_url = gcp_rt.cua_local_url(handle)
+            gcp_novnc_url = gcp_rt.novnc_local_url(handle)
 
             async with self._lock:
                 task = self._tasks.get(task_id)
@@ -677,13 +682,14 @@ class EnvScheduler:
                 self._gcp_handles[lease_id] = handle
                 self._lease_runtime[lease_id] = "gcp"
 
+                # TODO multi-port GCP: populate all published ports
                 assignment = TaskAssignment(
                     host_id=self.host_config.host_id,
                     lease_id=lease_id,
                     slot_id=slot_id,
                     snapshot_name=snapshot_name,
-                    cua_url=cua_url,
-                    novnc_url=novnc_url,
+                    urls={5000: gcp_cua_url},
+                    novnc_url=gcp_novnc_url,
                 )
                 task.lease_id = lease_id
                 task.assignment = assignment
@@ -836,7 +842,11 @@ class EnvScheduler:
     def _snapshot_batch(batch: BatchStatus) -> BatchStatus:
         return batch.model_copy(deep=True)
 
-    async def resolve_proxy_targets(self, lease_id: str) -> tuple[str, str]:
+    async def resolve_proxy_target(self, lease_id: str, service: str) -> str:
+        """Resolve a proxy target URL for a given lease and service.
+
+        `service` is either "novnc" or a numeric port string (e.g. "5000").
+        """
         async with self._lock:
             lease = self._leases[lease_id]
             runtime_mode = self._lease_runtime.get(lease_id, "local")
@@ -846,10 +856,15 @@ class EnvScheduler:
                 if gcp_handle is None:
                     raise KeyError(f"GCP handle not found for lease {lease_id}")
                 gcp_rt = self._runtimes["gcp"]
-                return gcp_rt.cua_local_url(gcp_handle), gcp_rt.novnc_local_url(gcp_handle)
+                if service == "novnc":
+                    return gcp_rt.novnc_local_url(gcp_handle)
+                return gcp_rt.cua_local_url(gcp_handle)  # TODO multi-port GCP
             else:
                 vm_handle = self._vm_handles[lease.slot_id]
-                return self.runtime.vm_cua_local_url(vm_handle), self.runtime.vm_novnc_local_url(vm_handle)
+                if service == "novnc":
+                    return self.runtime.vm_novnc_local_url(vm_handle)
+                port = int(service)
+                return self.runtime.vm_published_url(vm_handle, port)
 
 
 def os_cpu_count() -> int:

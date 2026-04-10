@@ -55,11 +55,13 @@ class TaskRequirement(BaseModel):
 
     task_id: str
     task_path: str
-    os_type: str | None = None
     snapshot_name: str
     machine_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskDataRequest | None = None
+    # NOTE: os_type is intentionally NOT a client field. It is an image-static
+    # property declared in images.yaml as `os_family`. Server reads it from the
+    # catalog by snapshot_name. See docs/protocol/api-overview.md.
 
 
 class BatchCreateRequest(BaseModel):
@@ -90,18 +92,30 @@ class BatchCancelRequest(BaseModel):
 
 
 class TaskAssignment(BaseModel):
+    """Where to reach a leased VM.
+
+    `urls` maps each guest TCP port (declared in the image's `published_ports`)
+    to a publicly-reachable URL routed through the cua-house reverse proxy.
+    Clients pick whichever port(s) they need by integer key. The set of keys
+    is image-specific and the server attaches no semantic name to any port —
+    it is the client's responsibility to know what runs on each.
+
+    `novnc_url` remains a separate field because noVNC is a container-side
+    infrastructure service (not a guest port) and uses a path-prefixed
+    proxy route ``/novnc/...`` rather than a per-port subdomain.
+    """
+
     host_id: str
-    cua_url: str | None = None
-    novnc_url: str | None = None
     lease_id: str
     slot_id: str
     snapshot_name: str
+    urls: dict[int, str] = Field(default_factory=dict)
+    novnc_url: str | None = None
 
 
 class TaskStatus(BaseModel):
     task_id: str
     task_path: str
-    os_type: str | None = None
     snapshot_name: str
     machine_type: str | None = None
     cpu_cores: int

@@ -1,6 +1,8 @@
 images:
   cpu-free:
     enabled: true
+    os_family: windows
+    published_ports: [5000]
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260406.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260406.qcow2
@@ -18,6 +20,8 @@ images:
 
   cpu-license:
     enabled: false
+    os_family: windows
+    published_ports: [5000]
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-license/cpu-license-20260405.qcow2
       default_cpu_cores: 4
@@ -34,6 +38,8 @@ images:
 
   gpu-free:
     enabled: true
+    os_family: linux
+    published_ports: [5000]
     gcp:
       project: sunblaze-4
       zone: us-central1-a
@@ -50,6 +56,8 @@ images:
 
   cpu-free-ubuntu:
     enabled: true
+    os_family: linux
+    published_ports: [5000]
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
@@ -67,6 +75,8 @@ images:
 
   waa:
     enabled: true
+    os_family: windows
+    published_ports: [5000, 9222, 8080]
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/waa/waa-20260408.qcow2
       gcs_uri: gs://agenthle-images/templates/waa/waa-20260408.qcow2
@@ -75,6 +85,8 @@ images:
 
   gpu-license:
     enabled: false
+    os_family: linux
+    published_ports: [5000]
     gcp:
       project: sunblaze-4
       zone: us-west1-c

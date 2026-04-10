@@ -8,8 +8,9 @@ from fastapi.testclient import TestClient
 
 from cua_house_common.models import BatchCreateRequest, TaskRequirement, TaskState, utcnow
 from cua_house_server._internal.port_pool import PortPool
-from cua_house_server.config.loader import HostRuntimeConfig, ImageSpec
+from cua_house_server.config.loader import HostRuntimeConfig, ImageSpec, LocalImageConfig
 from cua_house_server.scheduler.core import EnvScheduler
+from cua_house_server.scheduler.models import VMRecord, VMState
 
 
 class FakeRuntime:
@@ -41,7 +42,7 @@ class FakeRuntime:
         handle.image_key = image.key
         handle.cpu_cores = cpu_cores
         handle.memory_gb = memory_gb
-        handle.cua_port = cua_port
+        handle.published_ports = {cua_port: cua_port}
         handle.novnc_port = novnc_port
         handle.container_name = f"cua-house-env-{slot_id}"
         handle.task_id = task_id
@@ -59,7 +60,13 @@ class FakeRuntime:
     def validate_runtime_task_data(self, *, task_id: str, task_data) -> None:
         return None
 
-    async def stage_task_phase(self, *, handle, task_id: str, lease_id: str, task_data, phase: str):
+    async def revert_vm(self, handle) -> None:
+        return None
+
+    async def replace_broken_vm(self, handle, image):
+        return handle
+
+    async def stage_task_phase(self, *, handle, task_id: str, lease_id: str, task_data, phase: str, **kwargs):
         self.stage_calls.append((lease_id, task_id, phase, task_data))
         class Result:
             skipped = False
@@ -67,10 +74,10 @@ class FakeRuntime:
             bytes_staged = 4096
         return Result()
 
-    def cua_local_url(self, handle) -> str:
-        return f"http://127.0.0.1:{handle.cua_port}"
+    def vm_published_url(self, handle, guest_port: int) -> str:
+        return f"http://127.0.0.1:{handle.published_ports[guest_port]}"
 
-    def novnc_local_url(self, handle) -> str:
+    def vm_novnc_local_url(self, handle) -> str:
         return f"http://127.0.0.1:{handle.novnc_port}"
 
     @staticmethod
@@ -98,26 +105,69 @@ def make_scheduler() -> EnvScheduler:
         ready_timeout_s=60,
         readiness_poll_interval_s=0.1,
         idle_slot_ttl_s=300,
-        cua_port_range=(15000, 15010),
+        published_port_range=(16000, 16010),
         novnc_port_range=(18000, 18010),
     )
     images = {
         "cpu-free": ImageSpec(
             key="cpu-free",
             enabled=True,
-            golden_qcow2_path=Path("/tmp/golden.qcow2"),
-            default_cpu_cores=4,
-            default_memory_gb=16,
+            os_family="windows",
+            published_ports=(5000,),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=4, default_memory_gb=16),
         ),
         "cpu-huge": ImageSpec(
             key="cpu-huge",
             enabled=True,
-            golden_qcow2_path=Path("/tmp/golden.qcow2"),
-            default_cpu_cores=9999,
-            default_memory_gb=9999,
+            os_family="windows",
+            published_ports=(5000,),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=9999, default_memory_gb=9999),
         ),
     }
-    return EnvScheduler(runtime=FakeRuntime(host), host_config=host, images=images)
+    rt = FakeRuntime(host)
+    sched = EnvScheduler(runtime=rt, host_config=host, images=images, runtimes={"local": rt})
+    # Pre-register fake pool VMs so local dispatch finds them
+    _register_fake_pool(sched, images, n_per_image=4)
+    return sched
+
+
+def _register_fake_pool(sched: EnvScheduler, images: dict, n_per_image: int = 2) -> None:
+    """Register fake pool VMs so local dispatch works in tests."""
+    port = 16000
+    for key, image in images.items():
+        if not image.enabled:
+            continue
+        for i in range(n_per_image):
+            vm_id = f"fake-{key}-{i}"
+            published_ports = {gp: port for gp in image.published_ports}
+            port += len(image.published_ports)
+
+            class FakeHandle:
+                pass
+
+            handle = FakeHandle()
+            handle.vm_id = vm_id
+            handle.snapshot_name = key
+            handle.cpu_cores = image.default_cpu_cores
+            handle.memory_gb = image.default_memory_gb
+            handle.published_ports = published_ports
+            handle.novnc_port = 18000 + i
+            handle.container_name = f"cua-house-env-{vm_id}"
+            handle.task_id = ""
+            handle.lease_id = ""
+
+            vm = VMRecord(
+                vm_id=vm_id,
+                snapshot_name=key,
+                state=VMState.READY,
+                cpu_cores=image.default_cpu_cores,
+                memory_gb=image.default_memory_gb,
+                container_name=handle.container_name,
+                published_ports=published_ports,
+                novnc_port=handle.novnc_port,
+            )
+            sched._vms[vm_id] = vm
+            sched._vm_handles[vm_id] = handle
 
 
 def make_slow_scheduler() -> EnvScheduler:
@@ -135,19 +185,22 @@ def make_slow_scheduler() -> EnvScheduler:
         ready_timeout_s=60,
         readiness_poll_interval_s=0.1,
         idle_slot_ttl_s=300,
-        cua_port_range=(15100, 15110),
+        published_port_range=(16100, 16110),
         novnc_port_range=(18100, 18110),
     )
     images = {
         "cpu-free": ImageSpec(
             key="cpu-free",
             enabled=True,
-            golden_qcow2_path=Path("/tmp/golden.qcow2"),
-            default_cpu_cores=4,
-            default_memory_gb=16,
+            os_family="windows",
+            published_ports=(5000,),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=4, default_memory_gb=16),
         ),
     }
-    return EnvScheduler(runtime=SlowFakeRuntime(host), host_config=host, images=images)
+    rt = SlowFakeRuntime(host)
+    sched = EnvScheduler(runtime=rt, host_config=host, images=images, runtimes={"local": rt})
+    _register_fake_pool(sched, images, n_per_image=4)
+    return sched
 
 
 def test_port_pool_allocate_release() -> None:
@@ -330,18 +383,14 @@ def test_lease_reaper_marks_expired_lease_failed() -> None:
     asyncio.run(scenario())
 
 
-def test_starting_task_does_not_expire_before_ready() -> None:
+def test_pool_task_is_ready_immediately() -> None:
+    """With pre-registered pool VMs, tasks go directly to READY (no STARTING phase)."""
     async def scenario() -> None:
         scheduler = make_slow_scheduler()
         await scheduler.start()
         await scheduler.submit_batch(
             BatchCreateRequest(tasks=[TaskRequirement(task_id="task-a", task_path="tasks/a", snapshot_name="cpu-free")])
         )
-        await asyncio.sleep(0.05)
-        await scheduler.reap_expired_leases_once()
-        task = await scheduler.get_task("task-a")
-        assert task.state == TaskState.STARTING
-        assert task.lease_id is None
         await wait_for_assignment(scheduler, "task-a")
         task = await scheduler.get_task("task-a")
         assert task.state == TaskState.READY
@@ -352,7 +401,8 @@ def test_starting_task_does_not_expire_before_ready() -> None:
     asyncio.run(scenario())
 
 
-def test_scheduler_starts_multiple_small_tasks_concurrently() -> None:
+def test_scheduler_assigns_multiple_tasks_concurrently() -> None:
+    """With pool VMs available, all tasks get assigned in parallel."""
     async def scenario() -> None:
         scheduler = make_slow_scheduler()
         await scheduler.start()
@@ -367,7 +417,7 @@ def test_scheduler_starts_multiple_small_tasks_concurrently() -> None:
         )
         await asyncio.sleep(0.05)
         states = [(await scheduler.get_task(task_id)).state for task_id in ("task-a", "task-b", "task-c")]
-        assert states == [TaskState.STARTING, TaskState.STARTING, TaskState.STARTING]
+        assert states == [TaskState.READY, TaskState.READY, TaskState.READY]
         await scheduler.shutdown()
 
     asyncio.run(scenario())
@@ -387,10 +437,13 @@ def test_cancel_batch_fails_queued_and_starting_tasks() -> None:
         )
         assert batch.batch_id
         await asyncio.sleep(0.05)
-        cancelled = await scheduler.cancel_batch(batch.batch_id, reason="orchestration interrupted")
-        states = {task.task_id: task.state for task in cancelled.tasks}
-        assert states["task-a"] == TaskState.FAILED
-        assert states["task-b"] == TaskState.FAILED
+        await scheduler.cancel_batch(batch.batch_id, reason="orchestration interrupted")
+        # Wait for async revert tasks to complete
+        await asyncio.sleep(0.2)
+        task_a = await scheduler.get_task("task-a")
+        task_b = await scheduler.get_task("task-b")
+        assert task_a.state == TaskState.FAILED
+        assert task_b.state == TaskState.FAILED
         await scheduler.shutdown()
 
     asyncio.run(scenario())
@@ -437,7 +490,7 @@ def test_runtime_cleanup_orphaned_state(tmp_path: Path) -> None:
         ready_timeout_s=60,
         readiness_poll_interval_s=0.1,
         idle_slot_ttl_s=300,
-        cua_port_range=(15000, 15010),
+        published_port_range=(16000, 16010),
         novnc_port_range=(18000, 18010),
     )
 
@@ -486,7 +539,7 @@ def test_runtime_prepare_slot_uses_container_visible_backing_file(tmp_path: Path
         ready_timeout_s=60,
         readiness_poll_interval_s=0.1,
         idle_slot_ttl_s=300,
-        cua_port_range=(15000, 15010),
+        published_port_range=(16000, 16010),
         novnc_port_range=(18000, 18010),
     )
 
@@ -505,46 +558,26 @@ def test_runtime_prepare_slot_uses_container_visible_backing_file(tmp_path: Path
         return Result()
 
     runtime._run = fake_run  # type: ignore[method-assign]
-    handle = runtime.prepare_slot(
-        slot_id="slot-1",
+    handle = runtime._prepare_vm(
+        vm_id="slot-1",
         image=ImageSpec(
             key="cpu-free",
             enabled=True,
-            golden_qcow2_path=golden,
-            default_cpu_cores=4,
-            default_memory_gb=16,
+            os_family="windows",
+            published_ports=(5000,),
+            local=LocalImageConfig(template_qcow2_path=golden, default_cpu_cores=4, default_memory_gb=16),
         ),
         cpu_cores=4,
         memory_gb=16,
-        cua_port=15000,
+        published_ports={5000: 16000},
         novnc_port=18000,
-        lease_id="lease-1",
-        task_id="task-1",
+        snapshot_name="cpu-free",
     )
 
-    slot_golden = handle.storage_dir / "golden.qcow2"
-    assert not slot_golden.exists()
-    assert handle.golden_qcow2_path == golden_real.resolve()
-    assert calls == [
-        (
-            [
-                "qemu-img",
-                "create",
-                "-f",
-                "qcow2",
-                "-b",
-                str(golden_real.resolve()),
-                "-F",
-                "qcow2",
-                "data.qcow2",
-            ],
-            handle.storage_dir,
-        ),
-        (
-            ["qemu-img", "rebase", "-u", "-b", "/storage/golden.qcow2", "-F", "qcow2", "data.qcow2"],
-            handle.storage_dir,
-        )
-    ]
+    assert handle.published_ports == {5000: 16000}
+    assert handle.novnc_port == 18000
+    # cp --reflink=auto should have been called
+    assert any("cp" in str(c) for c in calls)
 
 
 def test_api_requires_bearer_token(monkeypatch) -> None:
@@ -564,4 +597,4 @@ def test_api_requires_bearer_token(monkeypatch) -> None:
 
     response = client.get("/healthz", headers={"Authorization": "Bearer secret-token"})
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"

@@ -59,12 +59,13 @@ async def main():
         return 1
 
     handle = handles[0]
-    logger.info("VM: %s (%s), CUA port %d", handle.vm_id, handle.container_name, handle.cua_port)
+    primary_port = next(iter(handle.published_ports.values()))
+    logger.info("VM: %s (%s), published ports %s", handle.vm_id, handle.container_name, handle.published_ports)
 
     # Verify CUA is responsive
     import httpx
     async with httpx.AsyncClient(timeout=5) as client:
-        resp = await client.get(f"http://127.0.0.1:{handle.cua_port}/status")
+        resp = await client.get(f"http://127.0.0.1:{primary_port}/status")
         assert resp.status_code == 200, f"CUA not ready: {resp.status_code}"
         logger.info("CUA server is ready after pool init")
 
@@ -72,7 +73,7 @@ async def main():
     logger.info("=== Step 3: Dirty the VM (create test file) ===")
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)) as client:
         resp = await client.post(
-            f"http://127.0.0.1:{handle.cua_port}/cmd",
+            f"http://127.0.0.1:{primary_port}/cmd",
             json={"command": "run_command", "params": {"command": "echo SMOKE_TEST > C:\\Users\\User\\Desktop\\smoke.txt"}},
         )
         logger.info("Created smoke.txt on desktop")
@@ -87,12 +88,12 @@ async def main():
     # Verify CUA and check file is gone
     logger.info("=== Step 5: Verify revert ===")
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)) as client:
-        resp = await client.get(f"http://127.0.0.1:{handle.cua_port}/status")
+        resp = await client.get(f"http://127.0.0.1:{primary_port}/status")
         assert resp.status_code == 200, f"CUA not ready after revert: {resp.status_code}"
         logger.info("CUA is ready after revert")
 
         resp = await client.post(
-            f"http://127.0.0.1:{handle.cua_port}/cmd",
+            f"http://127.0.0.1:{primary_port}/cmd",
             json={"command": "run_command", "params": {"command": "if exist C:\\Users\\User\\Desktop\\smoke.txt (echo EXISTS) else (echo REVERTED)"}},
         )
         body = resp.text

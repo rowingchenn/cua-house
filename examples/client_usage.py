@@ -49,10 +49,10 @@ async def main() -> None:
         # 3. Get assignment info
         assignment = task["assignment"]
         lease_id = assignment["lease_id"]
-        cua_url = assignment["cua_url"]
-        novnc_url = assignment["novnc_url"]
+        urls = assignment["urls"]
+        novnc_url = assignment.get("novnc_url")
         print(f"lease: {lease_id}")
-        print(f"cua url: {cua_url}")
+        print(f"urls: {urls}")
         print(f"novnc url: {novnc_url}")
 
         # 4. Stage task data for runtime phase (if task has task_data)

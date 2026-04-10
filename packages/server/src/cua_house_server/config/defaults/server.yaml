@@ -11,7 +11,7 @@ heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
 idle_slot_ttl_s: 7200
-cua_port_range: [15000, 15999]
+published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
 
 # VM pool: persistent VMs started from pre-baked qcow2 templates.

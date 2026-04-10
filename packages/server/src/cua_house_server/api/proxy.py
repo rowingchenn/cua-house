@@ -16,33 +16,38 @@ from cua_house_server.scheduler.core import EnvScheduler
 logger = logging.getLogger(__name__)
 
 
-def lease_id_from_host(host_header: str | None, *, public_base_host: str) -> str | None:
-    """Extract lease ID from a Host header like ``lease-<id>.<base>``."""
+def parse_proxy_host(host_header: str | None, *, base_host: str) -> tuple[str, str] | None:
+    """Parse ``<service>--<lease_id>.<base_host>`` from a Host header.
+
+    Returns ``(service, lease_id)`` where *service* is ``"novnc"`` or a
+    numeric port string (e.g. ``"5000"``), or ``None`` if the header does
+    not match.
+    """
     if not host_header:
         return None
     host = host_header.split(":", 1)[0].lower()
-    suffix = f".{public_base_host.lower()}"
+    suffix = f".{base_host.lower()}"
     if not host.endswith(suffix):
         return None
     prefix = host[: -len(suffix)]
-    if not prefix.startswith("lease-"):
+    if "--" not in prefix:
         return None
-    return prefix[len("lease-"):]
+    service, lease_id = prefix.split("--", 1)
+    return service, lease_id
 
 
-async def resolve_proxy_target(scheduler: EnvScheduler, lease_id: str, *, novnc: bool) -> str:
+async def resolve_proxy_target(scheduler: EnvScheduler, lease_id: str, service: str) -> str:
     try:
-        cua_url, novnc_url = await scheduler.resolve_proxy_targets(lease_id)
+        return await scheduler.resolve_proxy_target(lease_id, service)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return novnc_url if novnc else cua_url
 
 
-async def proxy_http_handler(request: Request, lease_id: str, *, novnc: bool):
+async def proxy_http_handler(request: Request, lease_id: str, service: str):
     scheduler: EnvScheduler = request.app.state.scheduler
-    target_base_url = await resolve_proxy_target(scheduler, lease_id, novnc=novnc)
+    target_base_url = await resolve_proxy_target(scheduler, lease_id, service)
     incoming_path = request.url.path
-    if novnc:
+    if service == "novnc":
         prefix = "/novnc"
         target_path = incoming_path[len(prefix):] or "/"
     else:
@@ -76,11 +81,11 @@ async def proxy_http_handler(request: Request, lease_id: str, *, novnc: bool):
     )
 
 
-async def proxy_websocket_handler(websocket: WebSocket, lease_id: str, *, novnc: bool) -> None:
+async def proxy_websocket_handler(websocket: WebSocket, lease_id: str, service: str) -> None:
     scheduler: EnvScheduler = websocket.app.state.scheduler
-    target_base_url = await resolve_proxy_target(scheduler, lease_id, novnc=novnc)
+    target_base_url = await resolve_proxy_target(scheduler, lease_id, service)
     incoming_path = websocket.url.path
-    if novnc:
+    if service == "novnc":
         prefix = "/novnc"
         target_path = incoming_path[len(prefix):] or "/"
     else:
