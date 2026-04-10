@@ -65,6 +65,14 @@ images:
       default_machine_type: e2-standard-4
       max_concurrent_vms: 4
 
+  waa:
+    enabled: true
+    local:
+      template_qcow2_path: /home/weichenzhang/agenthle-env-images/waa/waa-20260408.qcow2
+      gcs_uri: gs://agenthle-images/templates/waa/waa-20260408.qcow2
+      default_cpu_cores: 4
+      default_memory_gb: 8
+
   gpu-license:
     enabled: false
     gcp:

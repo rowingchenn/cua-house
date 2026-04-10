@@ -9,6 +9,7 @@ How to update the Windows VM images used by cua-house. There are two image types
 | `cpu-free` | `cpu-free-20260406.qcow2` | `agenthle-dev-cpu-free-export-20260406` | 2026-04-06 | **Active** — Bridge update: MCP action tools text-only, OpenClaw plugin synced. Auto-snapshot by cua-house server. |
 | `cpu-free` | `golden.qcow2` | `agenthle-dev-cpu-free-agents-baked-20260405` | 2026-04-05 | Previous — External agents baked (Node.js 24.12, Claude Code, Codex, OpenClaw, MCP Server, CUA Plugin) |
 | `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `agenthle-ubuntu-agents-baked-20260408` | 2026-04-08 | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). |
+| `waa` | `waa-20260408.qcow2` | GCP image export (2026-04-09) | 2026-04-08 | **Active** (kvm-02 only) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QMP `savevm` on kvm-02. |
 | `cpu-license` | `golden.qcow2` | `agenthle-dev-cpu-licensed-agents-baked-20260405` | 2026-04-05 | Not yet updated with bridge changes |
 
 > Images stored at `/home/weichenzhang/agenthle-env-images/{image_key}/` on kvm0 (34.69.191.152).
@@ -122,55 +123,80 @@ docker rm -f cua-house-test
 
 If the CUA server responds with HTTP 200, the image is good.
 
-### Step 4: Take savevm snapshot via QMP
+### Step 4: Take savevm snapshot via QEMU monitor
 
-Start a container from the new qcow2, wait for it to be ready, then save the snapshot:
+Start a container from the new qcow2, wait for it to be ready, then save the snapshot. The recipe below is what works after the cua-house-server's accumulated patches; deviating from any of the gotchas re-runs into pitfalls 1, 3, 5.
 
 ```bash
-DATE=20260405
-IMAGE_KEY=cpu-free
-QCOW2=/home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+DATE=20260408
+IMAGE_KEY=waa
+QCOW2=/mnt/xfs/images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 
-mkdir -p /tmp/vm-snap/storage
-cp $QCOW2 /tmp/vm-snap/storage/vm.qcow2
+# Use a temp bake dir so we don't touch the template until savevm is confirmed.
+# Disk MUST be named data.qcow2 (DISK_NAME=data) -- pitfall #5.
+rm -rf /tmp/${IMAGE_KEY}-bake/storage
+mkdir -p /tmp/${IMAGE_KEY}-bake/storage
+cp $QCOW2 /tmp/${IMAGE_KEY}-bake/storage/data.qcow2
 
-# Start container (cold boot, no -loadvm yet)
-docker run --rm -d \
-    --name cua-house-snap \
-    --device /dev/kvm \
-    -e CPU_MODEL=host \
-    -e HV=N \
+docker rm -f ${IMAGE_KEY}-bake 2>/dev/null
+docker run -d \
+    --name ${IMAGE_KEY}-bake \
+    --device=/dev/kvm \
+    --cap-add NET_ADMIN \
+    -v /tmp/${IMAGE_KEY}-bake/storage:/storage \
+    -v /mnt/xfs/runtime/boot-patched.sh:/run/boot.sh:ro \
+    -p 127.0.0.1:16900:5000 \
+    -p 127.0.0.1:16906:8006 \
     -e RAM_SIZE=8G \
     -e CPU_CORES=4 \
-    -p 15901:5000 \
-    -v /tmp/vm-snap/storage:/storage \
+    -e CPU_MODEL=host \
+    -e HV=N \
+    -e VM_NET_IP=172.30.0.2 \
+    -e DISK_NAME=data \
+    -e LOADVM_SNAPSHOT= \
     trycua/cua-qemu-windows:latest
 
-# Wait until CUA server is responsive
-until curl -s http://127.0.0.1:15901/status | grep -q 200 2>/dev/null; do
-    curl -so /dev/null -w "%{http_code}" http://127.0.0.1:15901/status 2>/dev/null
-    sleep 5
+# Why each gotcha:
+#   --cap-add NET_ADMIN  → bridge networking; without it dockur falls back to passt
+#                          user-mode and port 5000 is not auto-forwarded (no readiness)
+#   patched boot.sh      → converts pflash UEFI vars from raw to qcow2 so savevm
+#                          can write a snapshot tag (pitfall #3)
+#   LOADVM_SNAPSHOT=     → must be defined (even empty) or the patched boot.sh
+#                          aborts with "unbound variable"; an empty value disables
+#                          the loadvm + watchdog patches so cold boot proceeds
+#   VM_NET_IP=172.30.0.2 → freezes the snapshot's guest IP to match what
+#                          cua-house-server containers will use (pitfall #2)
+
+# Wait until the in-guest server is responsive (~1-3 min for cold boot)
+until curl -sf -m 3 http://127.0.0.1:16900/status > /dev/null 2>&1; do
+    sleep 10
 done
 echo "VM ready"
 
-# Save snapshot via QMP (stop → savevm → cont)
-docker exec cua-house-snap bash -c \
-    'echo "{ \"execute\": \"qmp_capabilities\" }" | nc -q1 127.0.0.1 7200'
-docker exec cua-house-snap bash -c \
-    'printf "%s\n" \
-        "{\"execute\":\"stop\"}" \
-        "{\"execute\":\"savevm\",\"arguments\":{\"name\":\"'${IMAGE_KEY}'\"}}" \
-        "{\"execute\":\"cont\"}" | nc -q3 127.0.0.1 7200'
+# Save snapshot via the QEMU human monitor on port 7100 (always exposed by
+# dockur). The QMP/JSON path on port 7200 only exists if you pass
+# `-e ARGUMENTS=-qmp tcp:0.0.0.0:7200,server,nowait` to docker run.
+docker exec ${IMAGE_KEY}-bake bash -c \
+    "(echo stop; sleep 2; echo savevm ${IMAGE_KEY}; sleep 90; echo info snapshots; sleep 2; echo cont; sleep 1; echo quit) | timeout 180 nc localhost 7100"
+# Expect "info snapshots" to list a row with TAG = ${IMAGE_KEY}.
 
-# Stop container WITHOUT removing the storage dir
-docker stop cua-house-snap
+# Stop the container with `docker kill` (NOT docker stop) to avoid the graceful
+# shutdown writing a partial state into data.qcow2 (Ubuntu-bake pitfall).
+docker kill ${IMAGE_KEY}-bake
+docker rm ${IMAGE_KEY}-bake
 
-# Move the qcow2 (now with snapshot baked in) to the image dir
-cp /tmp/vm-snap/storage/vm.qcow2 $QCOW2
-rm -rf /tmp/vm-snap
+# Verify the snapshot tag landed
+qemu-img snapshot -l /tmp/${IMAGE_KEY}-bake/storage/data.qcow2
+
+# Move the baked qcow2 back into the template path
+mv /tmp/${IMAGE_KEY}-bake/storage/data.qcow2 $QCOW2
+rm -rf /tmp/${IMAGE_KEY}-bake
+qemu-img snapshot -l $QCOW2   # final sanity check
 ```
 
-> The QMP `savevm` writes the snapshot directly into `vm.qcow2`. The `docker stop` leaves the file intact.
+> The patched `boot.sh` is auto-generated by cua-house-server on first run and
+> lives at `{runtime_root}/boot-patched.sh`. If your runtime_root differs from
+> `/mnt/xfs/runtime`, adjust the `-v` mount accordingly.
 
 ### Step 5: Verify snapshot is present
 
