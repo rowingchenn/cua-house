@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import websockets
 from fastapi import HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from cua_house_server.scheduler.core import EnvScheduler
@@ -73,6 +73,21 @@ async def proxy_http_handler(request: Request, lease_id: str, service: str):
         for key, value in upstream.headers.items()
         if key.lower() not in {"content-length", "transfer-encoding", "connection"}
     }
+
+    # For small responses (< 256 KB), buffer the body and return with
+    # Content-Length. This avoids chunked transfer encoding which breaks
+    # clients that do raw-byte rewriting on the response (e.g. the local
+    # TCP port proxy rewriting Chrome DevTools WebSocket URLs).
+    upstream_cl = upstream.headers.get("content-length")
+    if upstream_cl is not None and int(upstream_cl) < 256 * 1024:
+        body = await upstream.aread()
+        await upstream.aclose()
+        return Response(
+            content=body,
+            status_code=upstream.status_code,
+            headers=response_headers,
+        )
+
     return StreamingResponse(
         upstream.aiter_raw(),
         status_code=upstream.status_code,
