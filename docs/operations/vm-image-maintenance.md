@@ -6,14 +6,14 @@ How to update the Windows VM images used by cua-house. There are two image types
 
 | Image key | qcow2 file | GCS object (baked) | Bake date | Description |
 |-----------|-----------|--------------------|-----------|-------------|
-| `cpu-free` | `cpu-free-20260406.qcow2` | `gs://agenthle-images/templates/cpu-free/cpu-free-20260406.qcow2` | 2026-04-06 | Bridge update: MCP action tools text-only, OpenClaw plugin synced. kvm0 only (not loaded into any active vm_pool). |
+| `cpu-free` | `cpu-free-20260413.qcow2` | `gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2` | 2026-04-13 (re-bake w/ savevm) | **Active** (kvm-02) — Re-baked on kvm-02 because the prior 2026-04-06 blob in GCS had no savevm tag, so any pool using `-loadvm cpu-free` failed at QEMU start (pitfall #17). Guest content unchanged from the 2026-04-06 bake. |
 | `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2` | 2026-04-09 (re-bake w/ cifs-utils) | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). Re-baked on kvm-02 after the original 2026-04-08 19:33 bake was found to be missing `cifs-utils` (pitfall #13). |
 | `waa` | `waa-20260408.qcow2` | `gs://agenthle-images/templates/waa/waa-20260408.qcow2` | 2026-04-10 | **Active** (kvm-02) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QEMU monitor `savevm` on kvm-02. |
-| `cpu-license` | `cpu-license-20260405.qcow2` | *(not uploaded)* | 2026-04-05 | Not yet updated with bridge changes. kvm0 only. |
+| `cpu-license` | `cpu-license-20260405.qcow2` | *(not uploaded)* | 2026-04-05 | Not yet updated with bridge changes. |
 
 > **Source of truth for local templates is GCS**, not any particular KVM host. The cua-house-server's `_ensure_local_templates()` auto-pulls from the `gcs_uri` in `images.yaml` on first startup, so any new node gets the current baked version for free. After **any** local re-bake, you MUST upload the new qcow2 back to GCS (`gsutil cp ...`) or future nodes will pull a stale version and either fail `-loadvm` or hit already-fixed guest-side bugs.
 >
-> Images are mirrored on `/mnt/xfs/images/{image_key}/` (kvm-02, XFS+reflink) and `/home/weichenzhang/agenthle-env-images/{image_key}/` (kvm0, legacy — being phased out).
+> On kvm-02 the images live on `/mnt/xfs/images/{image_key}/` (XFS+reflink) and are accessed through the `/home/weichenzhang/agenthle-env-images → /mnt/xfs/images` symlink so the same `template_qcow2_path` in `images.yaml` resolves on both legacy (kvm0) and current (kvm-02) hosts without per-host config drift.
 
 ---
 
@@ -162,9 +162,12 @@ docker run -d \
 #                          user-mode and port 5000 is not auto-forwarded (no readiness)
 #   patched boot.sh      → converts pflash UEFI vars from raw to qcow2 so savevm
 #                          can write a snapshot tag (pitfall #3)
-#   LOADVM_SNAPSHOT=     → must be defined (even empty) or the patched boot.sh
-#                          aborts with "unbound variable"; an empty value disables
-#                          the loadvm + watchdog patches so cold boot proceeds
+#   LOADVM_SNAPSHOT=     → empty value disables the loadvm + watchdog patches so
+#                          cold boot proceeds. With current server code the env
+#                          var is safe to omit entirely (patch uses default),
+#                          but older cached boot-patched.sh still crashes under
+#                          set -u if the var is unset (pitfall #18), so keep
+#                          setting it explicitly when in doubt.
 #   VM_NET_IP=172.30.0.2 → freezes the snapshot's guest IP to match what
 #                          cua-house-server containers will use (pitfall #2)
 

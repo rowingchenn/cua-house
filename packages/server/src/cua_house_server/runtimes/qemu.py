@@ -504,7 +504,7 @@ class DockerQemuRuntime:
             '      qemu-img convert -f raw -O qcow2 "$DEST.vars" "$DEST.vars.q2"\n'
             '      mv "$DEST.vars.q2" "$DEST.vars"\n'
             '    fi\n'
-            '    if [ -n "$LOADVM_SNAPSHOT" ] && ! qemu-img snapshot -l "$DEST.vars" 2>/dev/null | grep -q "$LOADVM_SNAPSHOT"; then\n'
+            '    if [ -n "${LOADVM_SNAPSHOT:-}" ] && ! qemu-img snapshot -l "$DEST.vars" 2>/dev/null | grep -q "$LOADVM_SNAPSHOT"; then\n'
             '      qemu-img snapshot -c "$LOADVM_SNAPSHOT" "$DEST.vars" 2>/dev/null || true\n'
             '    fi\n'
             '    BOOT_OPTS+=" -drive file=$DEST.vars,if=pflash,unit=1,format=qcow2"'
@@ -517,7 +517,7 @@ class DockerQemuRuntime:
         # Patch 2: inject -loadvm before boot.sh returns
         loadvm_snippet = (
             '\n# cua-house: resume from pre-baked snapshot\n'
-            'if [ -n "$LOADVM_SNAPSHOT" ]; then\n'
+            'if [ -n "${LOADVM_SNAPSHOT:-}" ]; then\n'
             '  BOOT_OPTS+=" -loadvm $LOADVM_SNAPSHOT"\n'
             'fi\n\n'
         )
@@ -537,7 +537,7 @@ class DockerQemuRuntime:
         # runs `rm -f /run/shm/qemu.*` at source time.
         watchdog_snippet = (
             '\n# cua-house: disable boot watchdog (no serial output with loadvm)\n'
-            'if [ -n "$LOADVM_SNAPSHOT" ]; then\n'
+            'if [ -n "${LOADVM_SNAPSHOT:-}" ]; then\n'
             '  ( sleep 10; touch /run/shm/qemu.end ) &\n'
             'fi\n'
         )

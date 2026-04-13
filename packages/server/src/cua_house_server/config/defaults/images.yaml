@@ -4,8 +4,8 @@ images:
     os_family: windows
     published_ports: [5000]
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260406.qcow2
-      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260406.qcow2
+      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
       default_cpu_cores: 4
       default_memory_gb: 8
     gcp:

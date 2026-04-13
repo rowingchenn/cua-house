@@ -185,3 +185,34 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 **Root cause**: VM revert only resets guest state. Output files are written through Samba/CIFS to the host's OverlayFS upper layer, which persists on disk. A re-run of the same task sees the old upper-layer content.
 
 **Fix**: In `_stage_vm_pool()` runtime phase, `rm -rf` the output dir before the task starts. Implemented via `_reset_remote_dir()` (Windows) and `_reset_remote_dir_linux()` (Linux) in `staging.py`.
+
+---
+
+## Observability / False Signals
+
+### 17. Missing savevm tag in qcow2 masquerades as a 15-minute cold-boot hang
+
+**Symptom**: `slot_ready_timeout` after the full `ready_timeout_s` (default 900s) for every VM of a specific `snapshot_name`. events.jsonl shows the full chain `vm_starting → slot_vm_ip_detected → slot_computer_server_wait_started → slot_ready_timeout` with `observed_boot_markers: ["computer_server_wait_started", "vm_ip_detected"]`, which *looks* like Windows booted but CUA never came up. cua-free-ubuntu / waa / any image with a valid savevm work fine in the same pool.
+
+**Root cause**: Two independent bugs stacked:
+
+1. The template qcow2 has **no savevm snapshot**. This happens when a re-bake accidentally overwrote the qcow2 *after* the savevm tag was created (e.g. `qemu-img convert` drops snapshots unless `-s` is passed) or when someone uploaded a pre-bake copy to GCS. Verify with `qemu-img snapshot -l /path/to/template.qcow2`: the list should contain a row with `TAG = <image_key>`. If the listing is empty, the tag is gone.
+
+2. QEMU `-loadvm <tag>` with a missing tag **exits non-zero at startup**. `/run/entry.sh` (dockur) then exits. The cua-house wrapper `/entry.sh` spawned `/run/entry.sh` in the background as `VM_PID=$!` but never checks whether that child is still alive — it just loops on `curl 172.30.0.2:5000/status` until `ready_timeout_s`. Meanwhile the `slot_vm_ip_detected` event is emitted the moment the wrapper's internal VM_IP detection runs — but that detection is `ps aux | grep dnsmasq | grep -oP '(?<=--dhcp-range=)[0-9.]+'`, i.e. it reads the **dnsmasq command line**, not an actual DHCP lease. dnsmasq starts long before QEMU does, so `vm_ip_detected` fires even for a container whose VM never booted. The event is a **false positive** and cannot be used as evidence that the guest OS actually reached the network stack.
+
+**Diagnostic shortcut**: On a failed pool slot, `docker exec <container> ps auxf` and look for `qemu-system-x86_64`. If absent, the VM never actually started — don't waste time debugging autologon or in-guest services. Check `qemu-img snapshot -l` on the template first.
+
+**Fix applied**: re-baked `cpu-free-20260413.qcow2` with a valid savevm tag (see vm-image-maintenance.md). No code change is required on the host side, but consider:
+- Pre-flight check in `_ensure_local_templates()` that `qemu-img snapshot -l` contains the expected tag, failing fast instead of waiting `ready_timeout_s` per slot.
+- Wrapper `/entry.sh` monitors `VM_PID` and exits with an error if the QEMU backgrounded process dies, so containers fail fast instead of looping forever.
+- Derive `slot_vm_ip_detected` from an actual DHCP lease (e.g. `/var/lib/misc/dnsmasq.leases`) or from a successful ARP probe, not from the dnsmasq command line.
+
+### 18. Patched boot.sh aborted with `LOADVM_SNAPSHOT: unbound variable` under `set -u`
+
+**Symptom**: Cold-boot bake containers (no `-e LOADVM_SNAPSHOT`) exited almost immediately with `boot.sh: line NNN: LOADVM_SNAPSHOT: unbound variable`; no QEMU process, but wrapper `/entry.sh` kept looping "Waiting for Cua computer-server to be ready".
+
+**Root cause**: `/run/entry.sh` runs under `set -Eeuo pipefail`. The cua-house patches wrote `[ -n "$LOADVM_SNAPSHOT" ]` with no default, so the nounset flag killed the script whenever the env var was not defined.
+
+**Workaround (before fix)**: Pass `-e LOADVM_SNAPSHOT=` (empty value). Documented in vm-image-maintenance.md Step 4 but easy to forget.
+
+**Fix**: All three patch snippets in `qemu.py _ensure_patched_boot_sh()` now use `${LOADVM_SNAPSHOT:-}` so an unset env var is treated as empty instead of crashing the script. Cached `boot-patched.sh` files must be removed so the server regenerates them with the fixed template.
