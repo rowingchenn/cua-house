@@ -29,12 +29,34 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument(
+        "--mode",
+        choices=["standalone", "master", "worker"],
+        default=None,
+        help="Cluster role (overrides config). standalone is the default single-node mode.",
+    )
+    parser.add_argument(
+        "--master-url",
+        default=None,
+        help="ws(s):// URL of the master cluster endpoint (worker mode only).",
+    )
+    parser.add_argument(
+        "--worker-id",
+        default=None,
+        help="Stable identifier for this worker node (worker mode only).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    app = create_app(host_config_path=args.host_config, image_catalog_path=args.image_catalog)
+    app = create_app(
+        host_config_path=args.host_config,
+        image_catalog_path=args.image_catalog,
+        mode_override=args.mode,
+        master_url_override=args.master_url,
+        worker_id_override=args.worker_id,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

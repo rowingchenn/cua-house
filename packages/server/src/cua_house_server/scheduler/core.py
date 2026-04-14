@@ -70,6 +70,10 @@ class EnvScheduler:
         self._gcp_handles: dict[str, GCPSlotHandle] = {}
         # Track which lease uses which runtime mode
         self._lease_runtime: dict[str, str] = {}  # lease_id -> "local" | "gcp"
+        # Optional async callback invoked whenever a task reaches a terminal
+        # state (COMPLETED / FAILED). Cluster-mode worker uses this to fire
+        # a TaskCompleted message up to master over WS.
+        self.task_finalized_callback: "Any | None" = None
 
     async def start(self) -> None:
         for rt in self._runtimes.values():
@@ -127,7 +131,11 @@ class EnvScheduler:
             for req in request.tasks:
                 if req.task_id in self._tasks:
                     raise ValueError(f"task_id already exists: {req.task_id}")
-                cpu_cores, memory_gb = self._resolve_resources(req.snapshot_name, req.machine_type)
+                cpu_cores, memory_gb = self._resolve_resources(
+                    req.snapshot_name,
+                    cpu_cores=req.cpu_cores,
+                    memory_gb=req.memory_gb,
+                )
                 task = TaskStatus(
                     task_id=req.task_id,
                     task_path=req.task_path,
@@ -370,12 +378,33 @@ class EnvScheduler:
     # ------------------------------------------------------------------
 
     async def _release_after_reset(self, lease_id: str, final_status: str, details: dict[str, Any]) -> None:
+        evicted = False
         async with self._lock:
             lease = self._leases[lease_id]
             task = self._tasks[lease.task_id]
-            vm = self._vms[lease.slot_id]
-            vm_handle = self._vm_handles[lease.slot_id]
-            vm.state = VMState.REVERTING
+            vm = self._vms.get(lease.slot_id)
+            vm_handle = self._vm_handles.get(lease.slot_id)
+            if vm is None or vm_handle is None:
+                # VM was hot-removed while a lease was bound to it; mark the
+                # task failed and drop the lease without touching runtime.
+                task.state = TaskState.FAILED
+                task.error = "vm evicted during reset"
+                task.updated_at = utcnow()
+                task.completed_at = utcnow()
+                self._leases.pop(lease_id, None)
+                self._lease_runtime.pop(lease_id, None)
+                self.event_logger.emit(
+                    "vm_evicted_during_reset",
+                    task_id=task.task_id,
+                    lease_id=lease_id,
+                    slot_id=lease.slot_id,
+                )
+                evicted = True
+            else:
+                vm.state = VMState.REVERTING
+        if evicted:
+            self._ensure_dispatch()
+            return
 
         reset_started = asyncio.get_running_loop().time()
         new_state = TaskState.COMPLETED if final_status == "completed" else TaskState.FAILED
@@ -422,6 +451,12 @@ class EnvScheduler:
                 )
             asyncio.create_task(self._auto_replace_vm(vm.vm_id))
         self._ensure_dispatch()
+        if self.task_finalized_callback is not None:
+            try:
+                snapshot = task.model_copy(deep=True)
+                await self.task_finalized_callback(snapshot)
+            except Exception:
+                logger.exception("task_finalized_callback failed for %s", task.task_id)
 
     # ------------------------------------------------------------------
     # GCP slot release (destroy VM)
@@ -768,22 +803,36 @@ class EnvScheduler:
             return None
         return min(queued, key=lambda t: t.created_at)
 
-    def _resolve_resources(self, snapshot_name: str, machine_type: str | None = None) -> tuple[int, int]:
+    def _resolve_resources(
+        self,
+        snapshot_name: str,
+        *,
+        cpu_cores: int | None = None,
+        memory_gb: int | None = None,
+    ) -> tuple[int, int]:
         """Resolve cpu_cores and memory_gb for a task.
 
-        For local: use image.local defaults or vm_pool entry.
-        For GCP: use image.gcp defaults (actual resources determined by machine_type at creation).
+        Client-supplied values take precedence. When either is missing, fall
+        back to the image defaults (local or GCP) or legacy vm_pool entries.
         """
         image = self.images.get(snapshot_name)
         if image is not None:
-            return image.default_cpu_cores, image.default_memory_gb
+            default_cpu = image.default_cpu_cores
+            default_mem = image.default_memory_gb
+        else:
+            default_cpu = None
+            default_mem = None
+            for entry in self.host_config.vm_pool:
+                if entry.snapshot_name == snapshot_name:
+                    default_cpu = entry.cpu_cores
+                    default_mem = entry.memory_gb
+                    break
+            if default_cpu is None:
+                raise ValueError(f"unknown snapshot_name: {snapshot_name}")
 
-        # Legacy fallback: check vm_pool entries
-        for entry in self.host_config.vm_pool:
-            if entry.snapshot_name == snapshot_name:
-                return entry.cpu_cores, entry.memory_gb
-
-        raise ValueError(f"unknown snapshot_name: {snapshot_name}")
+        resolved_cpu = cpu_cores if cpu_cores is not None else default_cpu
+        resolved_mem = memory_gb if memory_gb is not None else default_mem
+        return resolved_cpu, resolved_mem
 
     def _resolve_pool_entry(self, snapshot_name: str) -> "VMPoolEntry":
         from cua_house_common.models import VMPoolEntry
@@ -865,6 +914,134 @@ class EnvScheduler:
                     return self.runtime.vm_novnc_local_url(vm_handle)
                 port = int(service)
                 return self.runtime.vm_published_url(vm_handle, port)
+
+    # ------------------------------------------------------------------
+    # Cluster hooks: external VM + task registration (worker-in-cluster)
+    # ------------------------------------------------------------------
+
+    async def register_external_vm(
+        self,
+        handle: VMHandle,
+        *,
+        snapshot_name: str,
+        cpu_cores: int,
+        memory_gb: int,
+    ) -> None:
+        """Inject a hot-plug VM into ``_vms`` so existing lease code sees it.
+
+        Called by the worker-side cluster client after
+        ``DockerQemuRuntime.add_vm`` returns. The resulting VMRecord is
+        indistinguishable from a statically-pooled one from the rest of
+        the scheduler's POV — so ``_find_free_vm_locked``, staging, revert,
+        and the lease reaper all Just Work.
+        """
+        record = VMRecord(
+            vm_id=handle.vm_id,
+            snapshot_name=snapshot_name,
+            state=VMState.READY,
+            cpu_cores=cpu_cores,
+            memory_gb=memory_gb,
+            container_name=handle.container_name,
+            published_ports=handle.published_ports,
+            novnc_port=handle.novnc_port,
+        )
+        async with self._lock:
+            self._vms[handle.vm_id] = record
+            self._vm_handles[handle.vm_id] = handle
+
+    async def unregister_external_vm(self, vm_id: str) -> bool:
+        """Drop a VM from ``_vms`` when master sends REMOVE_VM.
+
+        Returns False if the VM is still leased (caller should defer).
+        """
+        async with self._lock:
+            vm = self._vms.get(vm_id)
+            if vm is None:
+                return True
+            if vm.state in {VMState.LEASED, VMState.REVERTING}:
+                return False
+            self._vms.pop(vm_id, None)
+            self._vm_handles.pop(vm_id, None)
+            return True
+
+    async def assign_external_task(
+        self,
+        *,
+        task_id: str,
+        task_path: str,
+        snapshot_name: str,
+        cpu_cores: int,
+        memory_gb: int,
+        task_data: "TaskRequirement.TaskDataRequest | None",
+        metadata: dict[str, Any],
+        vm_id: str,
+        lease_id: str,
+        batch_id: str = "__cluster__",
+    ) -> TaskStatus:
+        """Accept a master-dispatched AssignTask.
+
+        Creates a TaskStatus + LeaseRecord bound to the given VM without
+        going through the local dispatch queue. Exists purely for cluster
+        mode — standalone never calls this.
+        """
+        now = utcnow()
+        async with self._lock:
+            if task_id in self._tasks:
+                raise ValueError(f"task_id already exists: {task_id}")
+            vm = self._vms.get(vm_id)
+            if vm is None:
+                raise ValueError(f"vm {vm_id} not registered")
+            if vm.state != VMState.READY:
+                raise ValueError(f"vm {vm_id} not ready (state={vm.state})")
+            task = TaskStatus(
+                task_id=task_id,
+                task_path=task_path,
+                snapshot_name=snapshot_name,
+                cpu_cores=cpu_cores,
+                memory_gb=memory_gb,
+                metadata=metadata,
+                task_data=task_data,
+                state=TaskState.READY,
+                batch_id=batch_id,
+                lease_id=lease_id,
+                created_at=now,
+                updated_at=now,
+            )
+            self._tasks[task_id] = task
+            vm.state = VMState.LEASED
+            vm.task_id = task_id
+            vm.lease_id = lease_id
+            vm.last_used_at = now
+            lease = LeaseRecord(
+                lease_id=lease_id,
+                task_id=task_id,
+                slot_id=vm_id,
+                expires_at=now + timedelta(seconds=self.host_config.heartbeat_ttl_s),
+            )
+            self._leases[lease_id] = lease
+            self._lease_runtime[lease_id] = "local"
+            handle = self._vm_handles[vm_id]
+            urls = {
+                guest_port: self.runtime.vm_published_url(handle, guest_port)
+                for guest_port in handle.published_ports
+            }
+            assignment = TaskAssignment(
+                host_id=self.host_config.host_id,
+                lease_id=lease_id,
+                slot_id=vm_id,
+                snapshot_name=snapshot_name,
+                urls=urls,
+                novnc_url=self.runtime.vm_novnc_local_url(handle),
+            )
+            task.assignment = assignment
+            self.event_logger.emit(
+                "task_assigned_external",
+                task_id=task_id,
+                lease_id=lease_id,
+                vm_id=vm_id,
+                snapshot_name=snapshot_name,
+            )
+            return task.model_copy(deep=True)
 
 
 def os_cpu_count() -> int:

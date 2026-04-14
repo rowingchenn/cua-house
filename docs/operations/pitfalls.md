@@ -216,3 +216,59 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 **Workaround (before fix)**: Pass `-e LOADVM_SNAPSHOT=` (empty value). Documented in vm-image-maintenance.md Step 4 but easy to forget.
 
 **Fix**: All three patch snippets in `qemu.py _ensure_patched_boot_sh()` now use `${LOADVM_SNAPSHOT:-}` so an unset env var is treated as empty instead of crashing the script. Cached `boot-patched.sh` files must be removed so the server regenerates them with the fixed template.
+
+---
+
+## Cluster mode deployment
+
+### 19. Master VM in the wrong VPC
+
+**Symptom**: Worker WebSocket connection attempt to master internal IP times out (not refused). `nc -zv 10.x.x.x 22` from worker succeeds, `nc -zv 10.x.x.x 8787` hangs for the full timeout. Master process is healthy and listening on `0.0.0.0:8787` locally.
+
+**Root cause**: Master VM created on `default` VPC while workers are on `agenthle-vpc`. Both subnets happen to use `10.128.0.0/20` so the internal IP *looks* plausible, but the two VPCs are isolated.
+
+**Fix**: `gcloud compute instances describe <master> --format='value(networkInterfaces[0].network)'`. Must match worker VPC. Recreate with `--network=agenthle-vpc --subnet=agenthle-vpc`.
+
+### 20. Master VM missing `agenthle` target tag
+
+**Symptom**: Same as above — worker-to-master 8787 times out. Master is in the right VPC, TCP/22 works both directions, OS firewall is disabled. The `agenthle-allow-env-server` firewall rule exists and appears in `gcloud compute firewall-rules list`.
+
+**Root cause**: `agenthle-allow-env-server` (and the equivalent for 16000–18999) has `targetTags: [agenthle]`. Fresh VMs created with `gcloud compute instances create` don't apply the tag automatically.
+
+**Fix**: `gcloud compute instances add-tags <master> --tags=agenthle --zone=<zone>`. Repeat for every new worker VM.
+
+### 21. `vm_bind_address` defaults to `127.0.0.1`
+
+**Symptom**: Worker registers with master, VM boots, `TaskBound` returns URLs like `http://worker.ip:16000`. Client hits 16000 → "Connection refused" (not timeout). On the worker, `docker port <container>` shows `5000/tcp -> 127.0.0.1:16000`.
+
+**Root cause**: Docker `-p` flag in `_start_vm_container` binds to `self.config.vm_bind_address` (default `127.0.0.1`). In standalone mode this is intentional — clients reach VMs only through master's reverse proxy on the same host. In cluster mode clients connect directly to the worker across the VPC, so the loopback binding blocks them.
+
+**Fix**: Set `vm_bind_address: 0.0.0.0` in the worker's `server.yaml`. Worker restart re-creates containers with the new binding. Network-level access control is delegated to VPC firewall rules (`agenthle-allow-vm-ports`, 10.0.0.0/8).
+
+### 22. `task_data_root` unwritable by the worker user
+
+**Symptom**: Worker fails startup with `RuntimeError: worker mode: task_data_root /mnt/agenthle-task-data is not writable by current user`. Or the check is bypassed and `stage-runtime` crashes mid-task with `Permission denied` on the first write.
+
+**Root cause**: OverlayFS upper layer (`/mnt/xfs/task-data-upper`) and merged view are commonly created `root:root` during host provisioning. The cua-house process runs as an unprivileged user.
+
+**Fix**: `sudo chown -R $(id -un):$(id -gn) /mnt/agenthle-task-data /mnt/xfs/task-data-upper /mnt/xfs/task-data-work`. The worker mode startup check catches this before the first task runs.
+
+### 23. Worker WS reconnect backoff after master restart
+
+**Symptom**: After `master.log` shows a new `INFO: Uvicorn running...`, the workers' `worker.log` keeps printing `Worker WS disconnected: received 1012 (service restart)` and `Connect call failed (<master ip>, 8787)` for ~30–60s before recovering. `/v1/cluster/workers` on master returns `[]` during the window.
+
+**Behavior**: This is normal exponential backoff. Two back-to-back master restarts compound the backoff. No action needed — each worker's reconnect supervisor waits `min(reconnect_min_backoff_s * 2^n + jitter, reconnect_max_backoff_s)` between attempts. `ClusterPoolSpec.load_from_disk` restores desired state so reconciler re-converges the pool after reconnect without operator intervention.
+
+### 24. Task stuck at state=ready on master while worker is reverting
+
+**Symptom**: Client successfully called `POST /v1/leases/{id}/complete` through master's lease proxy (HTTP 200). Master's `/v1/tasks/{id}` still returns `state: ready` for 100+ seconds.
+
+**Root cause**: This is expected. Master's task view is a projection that updates in three places only:
+
+1. `ClusterDispatcher.submit_batch` (QUEUED)
+2. `_try_assign` after `TaskBound` arrives (READY)
+3. `handle_task_completed` after the worker emits `TaskCompleted` over WS
+
+Between READY and the worker's revert finishing (typically 90–120s for cpu-free images via QMP loadvm), master has no reason to touch the state. The worker's local scheduler owns the LEASED / RESETTING transitions during that window.
+
+**If you need authoritative real-time status**: poll the worker's `GET /v1/leases/{id}/...` (not implemented but trivial to add), or read the worker's `events.jsonl` directly. For normal operation wait for the `TaskCompleted → state=completed` transition — it arrives within ~1s of revert finishing on the worker.

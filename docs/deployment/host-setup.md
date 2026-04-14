@@ -2,6 +2,20 @@
 
 How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 
+> **Deploying a multi-node cluster?** This document covers the
+> standalone (single-node) model. For the master + worker cluster model
+> see [cluster.md](cluster.md). A worker node is identical to a
+> standalone host except:
+>
+> - `mode: worker` in `server.yaml` and a `cluster:` section pointing
+>   at the master
+> - `vm_bind_address: 0.0.0.0` so VM ports are reachable across the VPC
+> - `vm_pool: []` — the worker's pool is pushed dynamically by master
+>   at runtime via PoolOp messages
+>
+> Everything below (filesystem layout, OverlayFS task-data sharing,
+> images.yaml, docker image) applies unchanged to workers.
+
 ## Host requirements
 
 - Linux (tested on Ubuntu 22.04/24.04)

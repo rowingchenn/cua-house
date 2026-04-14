@@ -56,12 +56,21 @@ class TaskRequirement(BaseModel):
     task_id: str
     task_path: str
     snapshot_name: str
+    cpu_cores: int | None = None
+    memory_gb: int | None = None
     machine_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskDataRequest | None = None
     # NOTE: os_type is intentionally NOT a client field. It is an image-static
     # property declared in images.yaml as `os_family`. Server reads it from the
-    # catalog by snapshot_name. See docs/protocol/api-overview.md.
+    # catalog by snapshot_name. See docs/architecture/overview.md.
+    #
+    # NOTE: ``cpu_cores`` / ``memory_gb`` take precedence over the image's
+    # defaults when set by the client (e.g. agenthle after parsing the task
+    # card's ``vm.machineType``). Legacy clients that still send ``machine_type``
+    # as a string are accepted — the value is stored for auditing but not
+    # used for scheduling. See docs/architecture/cluster.md for the
+    # cluster-mode dispatch rules.
 
 
 class BatchCreateRequest(BaseModel):
@@ -111,6 +120,11 @@ class TaskAssignment(BaseModel):
     snapshot_name: str
     urls: dict[int, str] = Field(default_factory=dict)
     novnc_url: str | None = None
+    # In cluster mode, ``lease_endpoint`` is the base URL of the worker node
+    # serving this lease's HTTP API (``/v1/leases/{id}/heartbeat`` etc.).
+    # Clients POST lease-scoped operations here instead of to the master so
+    # master stays out of the per-task data path. Empty in standalone mode.
+    lease_endpoint: str | None = None
 
 
 class TaskStatus(BaseModel):

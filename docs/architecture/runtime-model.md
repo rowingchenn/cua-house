@@ -2,6 +2,12 @@
 
 This document details the pre-baked qcow2 model, snapshot lifecycle, and GCP VM lifecycle used by cua-house.
 
+> In cluster mode the same runtime model applies per worker. The worker's
+> `DockerQemuRuntime` gains hot-plug (`add_vm` / `remove_vm`) driven by
+> the master's `PoolReconciler` instead of loading the full pool at
+> startup. See [cluster.md](cluster.md) for how dispatch and pool
+> membership differ from standalone.
+
 ## Pre-baked qcow2 model (local runtime)
 
 ### Template qcow2

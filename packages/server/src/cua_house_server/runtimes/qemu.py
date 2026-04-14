@@ -64,6 +64,18 @@ class DockerQemuRuntime:
             component="env_server",
         )
         self.task_data = TaskDataManager(self.config.task_data_root, self.event_logger)
+        # Serializes mutations on shared disk/container state when multiple
+        # VMs are being prepared / started concurrently (hot-plug path).
+        self._mutation_lock = asyncio.Lock()
+        # Port pools owned by the runtime so hot-add can allocate outside of
+        # initialize_pool. In standalone mode initialize_pool reuses these.
+        from cua_house_server._internal.port_pool import PortPool
+        self._published_port_pool = PortPool(*self.config.published_port_range)
+        self._novnc_port_pool = PortPool(*self.config.novnc_port_range)
+        # Tracks VMs added via hot-plug so remove_vm can locate them. Static
+        # pools created via initialize_pool aren't tracked here (the scheduler
+        # owns them through its own dicts).
+        self._hotplug_handles: dict[str, VMHandle] = {}
 
     @property
     def slots_root(self) -> Path:
@@ -246,10 +258,8 @@ class DockerQemuRuntime:
         """
         from uuid import uuid4
 
-        from cua_house_server._internal.port_pool import PortPool
-
-        published_port_pool = PortPool(*self.config.published_port_range)
-        novnc_ports = PortPool(*self.config.novnc_port_range)
+        published_port_pool = self._published_port_pool
+        novnc_ports = self._novnc_port_pool
 
         # Ensure template qcow2 files exist locally (pull from GCS if needed)
         await self._ensure_local_templates(images)
@@ -327,40 +337,45 @@ class DockerQemuRuntime:
         )
         return ready_handles
 
-    async def _ensure_local_templates(self, images: dict[str, ImageSpec]) -> None:
-        """Ensure template qcow2 files exist locally, pulling from GCS if needed.
+    async def pull_template(self, image_key: str, image: ImageSpec) -> None:
+        """Ensure a single image's qcow2 template exists locally.
 
-        On a fresh node, templates are downloaded from GCS on first startup.
-        Subsequent startups skip the download (files already on local XFS disk).
+        Idempotent: returns immediately if the file already exists. Pulls from
+        GCS otherwise. Safe to call at hot-plug time from master-initiated
+        PoolOp.ADD_IMAGE.
         """
+        if not image.enabled or image.local is None:
+            return
+        local_path = image.local.template_qcow2_path
+        gcs_uri = image.local.gcs_uri
+        if local_path.exists():
+            logger.info("Template %s exists locally: %s", image_key, local_path)
+            return
+        if gcs_uri is None:
+            raise FileNotFoundError(
+                f"Template {local_path} not found and no gcs_uri configured for {image_key}"
+            )
+        logger.info("Pulling template %s from %s ...", image_key, gcs_uri)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        pull_start = time.perf_counter()
+        await asyncio.to_thread(
+            self._run, ["gsutil", "-m", "cp", gcs_uri, str(local_path)],
+        )
+        pull_s = time.perf_counter() - pull_start
+        size_gb = local_path.stat().st_size / 1e9
+        logger.info("Template %s pulled in %.1fs (%.1f GB)", image_key, pull_s, size_gb)
+        self.event_logger.emit(
+            "template_pulled",
+            image_key=image_key,
+            gcs_uri=gcs_uri,
+            pull_s=pull_s,
+            size_gb=round(size_gb, 1),
+        )
+
+    async def _ensure_local_templates(self, images: dict[str, ImageSpec]) -> None:
+        """Pull all missing templates in an image catalog."""
         for key, image in images.items():
-            if not image.enabled or image.local is None:
-                continue
-            local_path = image.local.template_qcow2_path
-            gcs_uri = image.local.gcs_uri
-            if local_path.exists():
-                logger.info("Template %s exists locally: %s", key, local_path)
-                continue
-            if gcs_uri is None:
-                raise FileNotFoundError(
-                    f"Template {local_path} not found and no gcs_uri configured for {key}"
-                )
-            logger.info("Pulling template %s from %s ...", key, gcs_uri)
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            pull_start = time.perf_counter()
-            await asyncio.to_thread(
-                self._run, ["gsutil", "-m", "cp", gcs_uri, str(local_path)],
-            )
-            pull_s = time.perf_counter() - pull_start
-            size_gb = local_path.stat().st_size / 1e9
-            logger.info("Template %s pulled in %.1fs (%.1f GB)", key, pull_s, size_gb)
-            self.event_logger.emit(
-                "template_pulled",
-                image_key=key,
-                gcs_uri=gcs_uri,
-                pull_s=pull_s,
-                size_gb=round(size_gb, 1),
-            )
+            await self.pull_template(key, image)
 
     def _prepare_vm(
         self,
@@ -431,12 +446,12 @@ class DockerQemuRuntime:
             # Patched boot.sh: converts pflash vars to qcow2 + loadvm support
             "-v", f"{patched_boot}:/run/boot.sh:ro",
             # noVNC is a container-side service (always port 8006 inside the container)
-            "-p", f"127.0.0.1:{handle.novnc_port}:8006",
+            "-p", f"{self.config.vm_bind_address}:{handle.novnc_port}:8006",
         ]
         # Published guest ports: bridge-mode iptables DNAT forwards container
         # traffic → guest VM IP automatically, so docker -p is sufficient.
         for guest_port, host_port in handle.published_ports.items():
-            cmd.extend(["-p", f"127.0.0.1:{host_port}:{guest_port}"])
+            cmd.extend(["-p", f"{self.config.vm_bind_address}:{host_port}:{guest_port}"])
         cmd.extend([
             "-e", f"RAM_SIZE={handle.memory_gb}G",
             "-e", f"CPU_CORES={handle.cpu_cores}",
@@ -634,6 +649,102 @@ class DockerQemuRuntime:
 
     def vm_novnc_local_url(self, handle: VMHandle) -> str:
         return f"http://127.0.0.1:{handle.novnc_port}"
+
+    # -- Hot-plug (cluster mode) ---------------------------------------
+
+    async def add_vm(
+        self,
+        *,
+        image: ImageSpec,
+        cpu_cores: int,
+        memory_gb: int,
+        snapshot_name: str | None = None,
+    ) -> VMHandle:
+        """Hot-add a single VM outside of pool initialization.
+
+        Used by the worker-side cluster client in response to PoolOp.ADD_VM.
+        Allocates ports from the runtime's instance pools, copies the template,
+        starts the container, waits for CUA readiness, and tracks the resulting
+        handle in ``_hotplug_handles`` so ``remove_vm`` can find it later.
+
+        The operation is serialized on ``_mutation_lock`` so concurrent
+        hot-plug ops can't race on disk or container state.
+        """
+        from uuid import uuid4
+
+        snapshot = snapshot_name or image.key
+        async with self._mutation_lock:
+            await self.pull_template(image.key, image)
+            vm_id = str(uuid4())
+            published_ports = {
+                guest_port: self._published_port_pool.allocate()
+                for guest_port in image.published_ports
+            }
+            novnc_port = self._novnc_port_pool.allocate()
+            handle = await asyncio.to_thread(
+                self._prepare_vm,
+                vm_id=vm_id,
+                image=image,
+                cpu_cores=cpu_cores,
+                memory_gb=memory_gb,
+                published_ports=published_ports,
+                novnc_port=novnc_port,
+                snapshot_name=snapshot,
+            )
+            await self._start_vm_container(handle)
+
+        # Wait for readiness outside the lock so other hot-adds can start
+        # preparing in parallel. Failure path cleans up the allocated state.
+        try:
+            await self.wait_ready(handle)
+            handle.ready_at = datetime.now(UTC)
+            handle.qmp = QMPClient(handle.container_name)
+        except Exception:
+            self._run(["docker", "rm", "-f", handle.container_name], check=False)
+            for port in published_ports.values():
+                self._published_port_pool.release(port)
+            self._novnc_port_pool.release(novnc_port)
+            raise
+
+        self._hotplug_handles[vm_id] = handle
+        self.event_logger.emit(
+            "vm_hot_added",
+            vm_id=vm_id,
+            snapshot_name=snapshot,
+            cpu_cores=cpu_cores,
+            memory_gb=memory_gb,
+        )
+        return handle
+
+    async def remove_vm(self, vm_id: str) -> None:
+        """Hot-remove a previously hot-added VM.
+
+        Tears down the container, wipes the slot directory, and releases the
+        host-loopback ports back to the runtime's pools. Unknown vm_ids are a
+        no-op so callers can retry safely.
+        """
+        handle = self._hotplug_handles.pop(vm_id, None)
+        if handle is None:
+            return
+        async with self._mutation_lock:
+            self._run(["docker", "rm", "-f", handle.container_name], check=False)
+            slot_root = self.slots_root / handle.vm_id
+            if slot_root.exists():
+                shutil.rmtree(slot_root, ignore_errors=True)
+            for port in handle.published_ports.values():
+                self._published_port_pool.release(port)
+            self._novnc_port_pool.release(handle.novnc_port)
+        self.event_logger.emit(
+            "vm_hot_removed",
+            vm_id=vm_id,
+            snapshot_name=handle.snapshot_name,
+        )
+
+    def hotplug_handle(self, vm_id: str) -> VMHandle | None:
+        return self._hotplug_handles.get(vm_id)
+
+    def list_hotplug_handles(self) -> list[VMHandle]:
+        return list(self._hotplug_handles.values())
 
     @staticmethod
     def _run(cmd: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:

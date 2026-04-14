@@ -184,6 +184,47 @@ class HostRuntimeConfig:
     snapshot_save_timeout_s: int = 300
     snapshot_revert_timeout_s: int = 300
     cua_ready_after_revert_timeout_s: int = 30
+    # Cluster mode. "standalone" preserves single-node behavior; "master" runs
+    # a control plane that coordinates workers; "worker" dials into a master.
+    mode: str = "standalone"
+    cluster: "ClusterConfig | None" = None
+    # Host IP the docker `-p` flag binds published_ports + novnc to. Defaults
+    # to 127.0.0.1 (standalone mode: clients hit master's reverse proxy on
+    # the same host and the proxy talks to loopback). In worker mode set to
+    # 0.0.0.0 so clients in the VPC can reach VM services directly on the
+    # worker's public IP.
+    vm_bind_address: str = "127.0.0.1"
+
+
+@dataclass(slots=True)
+class ClusterConfig:
+    """Cluster topology settings (only read when mode != 'standalone').
+
+    - master role: ``master_bind_path`` is the URL path used by the FastAPI
+      WebSocket endpoint (defaults to ``/v1/cluster/ws``). Workers connect via
+      any routable transport (TCP/HTTP(S)) to this app.
+    - worker role: ``master_url`` is the ws(s):// URL of the master's cluster
+      endpoint; ``worker_id`` uniquely identifies this node.
+    - Both roles read ``join_token`` from the ``CUA_HOUSE_CLUSTER_JOIN_TOKEN``
+      env var by default; the config value is an override for tests.
+    """
+
+    master_bind_path: str = "/v1/cluster/ws"
+    master_url: str | None = None
+    worker_id: str | None = None
+    join_token: str | None = None
+    # Public address this worker advertises in TaskBound URLs. Defaults to
+    # the host's external IP, but operators can override to use a VPC
+    # internal IP or a DNS hostname — whichever is the right side of the
+    # client/worker network boundary. Plain "host:port" or a full base URL.
+    worker_public_host: str | None = None
+    # Public HTTP port workers listen on for lease API. Must match the
+    # uvicorn --port on this node. Defaults to 8787.
+    worker_public_port: int = 8787
+    heartbeat_interval_s: float = 5.0
+    heartbeat_ttl_s: float = 30.0
+    reconnect_min_backoff_s: float = 1.0
+    reconnect_max_backoff_s: float = 30.0
 
 
 def _load_yaml(path: str | Path) -> dict:
@@ -221,6 +262,26 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         snapshot_save_timeout_s=int(raw.get("snapshot_save_timeout_s", 300)),
         snapshot_revert_timeout_s=int(raw.get("snapshot_revert_timeout_s", 300)),
         cua_ready_after_revert_timeout_s=int(raw.get("cua_ready_after_revert_timeout_s", 30)),
+        mode=str(raw.get("mode", "standalone")),
+        cluster=_load_cluster_config(raw.get("cluster")),
+        vm_bind_address=str(raw.get("vm_bind_address", "127.0.0.1")),
+    )
+
+
+def _load_cluster_config(raw: dict | None) -> ClusterConfig | None:
+    if raw is None:
+        return None
+    return ClusterConfig(
+        master_bind_path=str(raw.get("master_bind_path", "/v1/cluster/ws")),
+        master_url=raw.get("master_url"),
+        worker_id=raw.get("worker_id"),
+        join_token=raw.get("join_token") or os.environ.get("CUA_HOUSE_CLUSTER_JOIN_TOKEN"),
+        worker_public_host=raw.get("worker_public_host"),
+        worker_public_port=int(raw.get("worker_public_port", 8787)),
+        heartbeat_interval_s=float(raw.get("heartbeat_interval_s", 5.0)),
+        heartbeat_ttl_s=float(raw.get("heartbeat_ttl_s", 30.0)),
+        reconnect_min_backoff_s=float(raw.get("reconnect_min_backoff_s", 1.0)),
+        reconnect_max_backoff_s=float(raw.get("reconnect_max_backoff_s", 30.0)),
     )
 
 
