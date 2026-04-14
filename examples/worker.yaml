@@ -1,0 +1,78 @@
+# cua-house worker node configuration template.
+#
+# This is a template — `scripts/clone-worker.sh` renders it into
+# /etc/cua-house/worker.yaml on the target host during provisioning,
+# substituting the @@...@@ placeholders. Do NOT commit a hand-edited
+# copy with real values.
+#
+# See docs/deployment/clone-worker.md for the provisioning flow and
+# docs/deployment/cluster.md for the architecture context of every
+# cluster-specific field.
+
+host_id: @@WORKER_ID@@-worker
+host_external_ip: @@INTERNAL_IP@@
+public_base_host: @@INTERNAL_IP@@
+
+# Runtime root must live on XFS with reflink support for instant qcow2
+# copy-on-write. `clone-worker.sh` formats the per-node pd-ssd as XFS
+# and labels it `xfs-@@WORKER_ID@@` before the service starts.
+runtime_root: /mnt/xfs/runtime-cluster
+
+# Shared OverlayFS view — the lower layer is the read-only
+# agenthle-nested-kvm-01-task-data disk (attached RO to every worker),
+# the upper layer is per-node on /mnt/xfs/task-data-upper, and systemd
+# fstab mounts the merged view at /mnt/agenthle-task-data before our
+# unit starts. See docs/deployment/host-setup.md §"Multi-node task-data
+# sharing" for the exact mount recipe.
+task_data_root: /mnt/agenthle-task-data
+
+docker_image: trycua/cua-qemu-windows:latest
+
+# Leave some headroom for the dockur container supervisor + systemd +
+# journald. Tune per machine shape; kvm02/03 use these values.
+host_reserved_cpu_cores: 2
+host_reserved_memory_gb: 8
+
+# Generous TTLs because agent tasks may run for tens of minutes; the
+# worker's lease reaper only fires when the client genuinely stopped
+# heartbeating.
+batch_heartbeat_ttl_s: 7200
+heartbeat_ttl_s: 7200
+ready_timeout_s: 900
+readiness_poll_interval_s: 5
+idle_slot_ttl_s: 7200
+
+# The loopback ports docker publishes each VM on. Each worker uses its
+# own ports locally; the firewall rule `agenthle-allow-vm-ports` opens
+# this range VPC-internally to any tag=agenthle host.
+published_port_range: [16000, 16999]
+novnc_port_range: [18000, 18999]
+
+# Worker's own static pool is EMPTY by design. Master pushes ADD_VM
+# ops via the PoolReconciler per ClusterPoolSpec. Never populate this
+# on a cluster worker — it will race with master-driven pool ops.
+vm_pool: []
+
+snapshot_revert_timeout_s: 300
+cua_ready_after_revert_timeout_s: 30
+
+mode: worker
+
+# 0.0.0.0 is required in cluster mode so the docker-proxy bindings for
+# the VM's published_ports and noVNC ports are reachable from any host
+# in the VPC (and via worker_public_host from outside). Standalone mode
+# uses 127.0.0.1 because its reverse proxy runs on the same host.
+vm_bind_address: 0.0.0.0
+
+cluster:
+  master_url: @@MASTER_URL@@
+  worker_id: @@WORKER_ID@@
+  # The host + port this worker advertises in TaskBound URLs back to
+  # master. Clients use these to reach the worker's HTTP lease API and
+  # the VM service ports directly, bypassing master for the data path.
+  worker_public_host: @@INTERNAL_IP@@
+  worker_public_port: 8787
+  heartbeat_interval_s: 5
+  heartbeat_ttl_s: 30
+  reconnect_min_backoff_s: 1
+  reconnect_max_backoff_s: 30

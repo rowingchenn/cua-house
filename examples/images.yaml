@@ -1,77 +1,34 @@
-# cua-house-server image catalog
+# cua-house-server image catalog example.
 #
-# Each entry defines a VM image that can be referenced by task requirements
-# via the "image_key" field. Images can use either the local Docker+QEMU
-# runtime or the GCP Compute Engine runtime.
+# For the full catalog currently used in production, see
+# packages/server/src/cua_house_server/config/defaults/images.yaml —
+# that's the source of truth and what the clone-worker.sh script copies
+# to new workers by default.
+#
+# This file is a minimal template for operators creating a custom
+# catalog. Each image key can appear under `local:` (nested-KVM worker
+# runtime), `gcp:` (transient GCE VM runtime), or both.
 
 images:
 
-  # Local Docker+QEMU image (free software only)
+  # Canonical CPU-only Windows image. local.template_qcow2_path is where
+  # the qcow2 lives on the host filesystem; if missing and gcs_uri is
+  # set, the worker pulls it on first ADD_IMAGE via pull_template.
   cpu-free:
-    # Set to true to enable this image for scheduling
     enabled: true
-
-    # Runtime mode: "local" for Docker+QEMU, "gcp" for GCP Compute Engine
-    runtime_mode: local
-
-    # Path to the golden QCOW2 image on the host filesystem.
-    # Each VM gets a copy (reflink on XFS, full copy on ext4).
-    golden_qcow2_path: /home/user/images/cpu-free/golden.qcow2
-
-    # Optional: GCS URI for the template. If template_qcow2_path does not
-    # exist locally, the server pulls it from GCS on first startup.
-    # gcs_uri: gs://my-bucket/templates/cpu-free/golden.qcow2
-
-    # Default resources when task does not specify cpu_cores/memory_gb
-    default_cpu_cores: 4
-    default_memory_gb: 16
-
-  # Local Docker+QEMU image (with licensed software)
-  cpu-license:
-    enabled: false
-    runtime_mode: local
-    golden_qcow2_path: /home/user/images/cpu-license/golden.qcow2
-    default_cpu_cores: 4
-    default_memory_gb: 16
-
-  # GCP Compute Engine image with GPU
-  gpu-free:
-    enabled: false
-    runtime_mode: gcp
-
-    # GCP project and zone where VMs will be created
-    gcp_project: my-gcp-project
-    gcp_zone: us-west1-a
-
-    # VPC network for the VM
-    gcp_network: my-vpc
-
-    # Service account attached to the VM
-    gcp_service_account: my-sa@my-gcp-project.iam.gserviceaccount.com
-
-    # Machine type (must support GPU if gpu_type is set)
-    gcp_machine_type: g2-standard-4
-
-    # Boot disk source: prefer image (faster ~14s) over snapshot (~100s).
-    # Set one or the other, not both.
-    gcp_boot_image: my-boot-image-20260401
-    # gcp_boot_snapshot: my-boot-snapshot
-
-    # Data disk snapshot (optional). Contains task input/reference data.
-    # When set, a data disk is created from this snapshot and attached.
-    gcp_data_snapshot: my-data-disk-snapshot
-
-    # Disk sizes
-    gcp_boot_disk_gb: 64
-    gcp_data_disk_gb: 200
-
-    # GPU configuration (optional)
-    gpu_type: nvidia-l4
-    gpu_count: 1
-
-    # Default resources
-    default_cpu_cores: 4
-    default_memory_gb: 16
-
-    # Maximum concurrent VMs for this image key
-    max_concurrent_vms: 2
+    os_family: windows            # windows | linux
+    published_ports: [5000]       # guest TCP ports the image exposes
+    local:
+      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
+      default_cpu_cores: 4
+      default_memory_gb: 8
+    gcp:
+      project: sunblaze-4
+      zone: us-central1-a
+      network: agenthle-vpc
+      service_account: agenthle-vm-service@sunblaze-4.iam.gserviceaccount.com
+      boot_snapshot: agenthle-dev-cpu-free-agents-baked-20260405
+      boot_disk_gb: 64
+      default_machine_type: e2-standard-2
+      max_concurrent_vms: 4

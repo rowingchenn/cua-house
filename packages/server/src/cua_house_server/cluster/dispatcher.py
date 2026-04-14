@@ -359,22 +359,13 @@ class ClusterDispatcher:
             if best is None or leased_count < best[2]:
                 best = (session, vm.vm_id, leased_count)
         if best is None:
-            # TODO(phase 6): GCP overflow path.
-            # When no worker can host this image, fall back to spinning up a
-            # transient GCE VM via ``GCPVMRuntime`` on the master. This is
-            # required for GPU images (no nested-KVM worker can host them).
-            #
-            # Sketch:
-            #   image = self.images.get(task.snapshot_name)
-            #   if image and image.gcp and self.gcp_runtime is not None:
-            #       return None, None  # signal overflow attempt
-            # Then _try_assign would call _start_gcp_slot(task) which:
-            #   - creates a slot via gcp_runtime.prepare_slot + start_slot
-            #   - builds a TaskAssignment with lease_endpoint=master's URL
-            #   - tracks lease in self._gcp_leases so cancel/complete can
-            #     destroy the transient VM
-            # Master would need a new /v1/gcp-leases/{id}/complete route
-            # since workers don't serve GCP leases.
+            # No worker matches. Task stays QUEUED. This is intentional:
+            # the client is expected to route explicitly (e.g. agenthle
+            # decides between the local cluster and a GCP-only runtime
+            # upstream of cua-house). Silent dispatcher-side overflow to
+            # ``GCPVMRuntime`` was considered and explicitly rejected —
+            # see docs/architecture/cluster.md §"What's deliberately NOT
+            # in the cluster".
             return None, None
         return best[0], best[1]
 

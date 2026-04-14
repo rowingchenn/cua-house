@@ -91,6 +91,14 @@ Edit `images.yaml`:
 
 ## systemd service
 
+> **Cluster workers use a different unit.** See
+> [`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service)
+> and [clone-worker.md](clone-worker.md). The section below describes
+> the **standalone** unit. Cluster workers additionally depend on
+> `RequiresMountsFor=/mnt/xfs /mnt/agenthle-task-data`, set
+> `--mode worker`, and read `/etc/cua-house/worker.env` for the
+> cluster join token.
+
 Create `/etc/systemd/system/cua-house-server.service`:
 
 ```ini

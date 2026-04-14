@@ -111,6 +111,35 @@ class WorkerClusterClient:
         # Install the finalization hook so the scheduler's complete → revert
         # path automatically emits TaskCompleted back to master.
         scheduler.task_finalized_callback = self._on_task_finalized
+        # Log where the cluster join token came from so operators can
+        # cross-check a SHA-256 prefix against master without ever printing
+        # the secret itself. Catches env-var / config-file typos instantly
+        # from journalctl -u cua-house-worker.
+        self._log_token_provenance()
+
+    def _log_token_provenance(self) -> None:
+        import hashlib
+        import os
+
+        token = self.cluster.join_token
+        source: str
+        if token and os.environ.get("CUA_HOUSE_CLUSTER_JOIN_TOKEN") == token:
+            source = "env"
+        elif token:
+            source = "config"
+        else:
+            source = "NOT_SET"
+        if token:
+            digest = hashlib.sha256(token.encode()).hexdigest()[:8]
+            logger.info(
+                "cluster join token source=%s sha256_prefix=%s length=%d",
+                source, digest, len(token),
+            )
+        else:
+            logger.warning(
+                "cluster join token NOT SET — master will reject registration "
+                "if it expects a token",
+            )
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
@@ -173,7 +202,20 @@ class WorkerClusterClient:
 
     # ── loops ──────────────────────────────────────────────────────────
 
-    async def _send_register(self, ws: "websockets.WebSocketClientProtocol") -> None:
+    @classmethod
+    def build_register_frame(
+        cls,
+        host_config: HostRuntimeConfig,
+        cluster: ClusterConfig,
+        *,
+        hosted_images: list[str] | None = None,
+    ) -> Register:
+        """Construct the Register frame this worker would send to master.
+
+        Pure: no network, no WS state. Used both by the live connect path
+        (``_send_register``) and by the ``--print-register-frame`` dry-run
+        flag so operators can validate config before enabling the unit.
+        """
         import psutil
 
         try:
@@ -186,14 +228,21 @@ class WorkerClusterClient:
             total_cpu_cores=total_cpu,
             total_memory_gb=total_mem,
             total_disk_gb=total_disk,
-            reserved_cpu_cores=self.host_config.host_reserved_cpu_cores,
-            reserved_memory_gb=self.host_config.host_reserved_memory_gb,
+            reserved_cpu_cores=host_config.host_reserved_cpu_cores,
+            reserved_memory_gb=host_config.host_reserved_memory_gb,
         )
-        register = Register(
-            worker_id=self.cluster.worker_id or "",
+        return Register(
+            worker_id=cluster.worker_id or "",
             runtime_version="0.1.0",
             capacity=capacity,
-            hosted_images=sorted(self._hosted_images),
+            hosted_images=sorted(hosted_images or []),
+        )
+
+    async def _send_register(self, ws: "websockets.WebSocketClientProtocol") -> None:
+        register = self.build_register_frame(
+            self.host_config,
+            self.cluster,
+            hosted_images=list(self._hosted_images),
         )
         await self._send(ws, register)
 

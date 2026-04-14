@@ -1,0 +1,62 @@
+[Unit]
+# cua-house cluster worker daemon.
+#
+# Installed by scripts/clone-worker.sh at /etc/systemd/system/cua-house-worker.service
+# during new-worker provisioning. See docs/deployment/clone-worker.md for the
+# full bring-up sequence and docs/deployment/cluster.md for the architecture.
+Description=cua-house cluster worker
+# Runbook: cua-house/docs/deployment/clone-worker.md (deliberately no
+# Documentation= URL to avoid systemd's strict URL parser rejecting the
+# relative path).
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+# RequiresMountsFor auto-derives the .mount unit names from fstab entries,
+# so systemd will wait for /mnt/xfs and /mnt/agenthle-task-data to be mounted
+# before starting us. Avoids the fail-fast task_data_root writable check
+# firing on a race at boot.
+RequiresMountsFor=/mnt/xfs /mnt/agenthle-task-data
+
+[Service]
+Type=simple
+# TODO(security): migrate to a dedicated `cua-house` system user. weichenzhang
+# is pragmatic for now because the repo, uv venv, and docker group membership
+# already exist under that home on the baked worker boot disk.
+User=weichenzhang
+Group=weichenzhang
+WorkingDirectory=/home/weichenzhang/cua-house-mnc
+
+# Secrets (CUA_HOUSE_CLUSTER_JOIN_TOKEN) are kept out of this unit file and
+# held in /etc/cua-house/worker.env (mode 0600). See the runbook for how
+# clone-worker.sh writes that file.
+EnvironmentFile=/etc/cua-house/worker.env
+# Pin PATH so uv is found (systemd default omits ~/.local/bin) and
+# /snap/bin for gsutil (used by the worker's pull_template path).
+Environment=PATH=/home/weichenzhang/.local/bin:/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Belt-and-braces check: if the OverlayFS merged view disappeared between
+# fstab mount and our start, fail with a clear message instead of letting
+# Python's first write explode mid-task.
+ExecStartPre=/bin/bash -c 'test -w /mnt/agenthle-task-data || { echo "task_data_root /mnt/agenthle-task-data is not writable by $(id -un)"; exit 1; }'
+
+# `uv run` with an explicit --project makes the venv bootstrap idempotent:
+# if .venv is missing (fresh boot disk clone) it'll be synced before the
+# python process starts. Pinning the uv path avoids PATH surprises.
+ExecStart=/home/weichenzhang/.local/bin/uv run \
+    --project /home/weichenzhang/cua-house-mnc \
+    python -m cua_house_server.cli \
+    --host-config /etc/cua-house/worker.yaml \
+    --image-catalog /etc/cua-house/images.yaml \
+    --host 0.0.0.0 --port 8787 --mode worker
+
+Restart=on-failure
+RestartSec=10
+# KillMode=mixed sends SIGTERM to the main process but leaves its children
+# (docker containers, qemu) to be cleaned up by cleanup_orphaned_state() on
+# the next start. Prevents a restart loop from massacring in-flight QEMU.
+KillMode=mixed
+TimeoutStopSec=60
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -272,3 +272,11 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 Between READY and the worker's revert finishing (typically 90–120s for cpu-free images via QMP loadvm), master has no reason to touch the state. The worker's local scheduler owns the LEASED / RESETTING transitions during that window.
 
 **If you need authoritative real-time status**: poll the worker's `GET /v1/leases/{id}/...` (not implemented but trivial to add), or read the worker's `events.jsonl` directly. For normal operation wait for the `TaskCompleted → state=completed` transition — it arrives within ~1s of revert finishing on the worker.
+
+### 25. Cloned worker inherits stale `runtime_root/slots/*` from the source snapshot
+
+**Symptom**: A freshly cloned worker starts successfully, registers with master, accepts an `ADD_VM` pool op, but the new VM's storage dir already exists on disk (`EEXIST`-style failures from `_prepare_vm`) or — worse — `docker run` succeeds against a zombie qcow2 from the source host with an unpredictable guest filesystem.
+
+**Root cause**: The GCE boot-disk snapshot `scripts/clone-worker.sh` uses is taken **live** from a running source worker (kvm02). If that worker had any in-flight slots at snapshot time, the slot directories under `/mnt/xfs/runtime-cluster/slots/` are frozen into the snapshot. `cleanup_orphaned_state()` on the cloned worker kills docker containers with matching names (safe), but it does **not** touch the `slots/` directories — those are pure host filesystem state.
+
+**Fix**: Done in `scripts/_clone-worker-bootstrap.sh` — the post-SSH bootstrap block unconditionally `rm -rf`s `/mnt/xfs/runtime-cluster/slots` and the legacy `~/cua-house-mnc/runtime/slots` (if present) before enabling the systemd unit. If you run a manual clone without the bootstrap script, you **must** perform this cleanup yourself or the first ADD_VM will hit surprising failures.

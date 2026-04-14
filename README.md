@@ -66,6 +66,7 @@ See `docs/` for detailed documentation:
 - [Cluster architecture](docs/architecture/cluster.md)
 - [Host setup](docs/deployment/host-setup.md)
 - [Cluster deployment](docs/deployment/cluster.md)
+- [Cloning a new worker node](docs/deployment/clone-worker.md)
 - [GCP infrastructure](docs/deployment/gcp-infra.md)
 - [Development setup](docs/development/setup.md)
 - [Testing](docs/development/testing.md)

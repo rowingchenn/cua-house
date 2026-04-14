@@ -188,6 +188,28 @@ curl -sS http://127.0.0.1:8787/healthz    # {"status":"ok","mode":"master"}
 
 ### Worker
 
+**To provision a brand-new worker VM** (including boot disk snapshot,
+instance create, mount setup, systemd enable, master registration
+polling), run [`scripts/clone-worker.sh`](../../scripts/clone-worker.sh)
+— see [clone-worker.md](clone-worker.md) for the end-to-end runbook.
+
+**To start a worker manually** on an already-provisioned host that
+has `/etc/cua-house/{worker,images}.yaml` and
+`/etc/systemd/system/cua-house-worker.service` in place:
+
+```bash
+sudo systemctl start cua-house-worker
+sudo journalctl -u cua-house-worker -f
+```
+
+The systemd unit is at
+[`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service).
+It `EnvironmentFile=`s `/etc/cua-house/worker.env` (mode 0600)
+which holds the `CUA_HOUSE_CLUSTER_JOIN_TOKEN`.
+
+**Legacy / ad-hoc dev path** (used by the currently-running kvm02 and
+kvm03 pending their next restart) — do NOT use for new workers:
+
 ```bash
 cd ~/cua-house-mnc
 export CUA_HOUSE_CLUSTER_JOIN_TOKEN=...
@@ -199,7 +221,7 @@ setsid nohup uv run python -m cua_house_server.cli \
 disown
 ```
 
-Worker registers with master on startup; verify via:
+In either path, verify the worker registered with master:
 
 ```bash
 curl -sS http://<master>:8787/v1/cluster/workers | python3 -m json.tool
@@ -330,10 +352,13 @@ existed before the crash and completes after, the client's
 
 ### GPU task with no GPU worker
 
-Currently stays QUEUED. Phase 6 will add GCP overflow:
-`ClusterDispatcher._pick_worker` falls back to `GCPVMRuntime` when no
-worker matches and the image has a `gcp:` config. Until then, GPU tasks
-need to be run against a standalone-mode host with GCP fallback enabled.
+Task stays QUEUED indefinitely. This is intentional: the dispatcher
+**does not** silently fall back to `GCPVMRuntime`. Clients upstream of
+cua-house (e.g. agenthle) are expected to route GPU workloads to a
+GCP-only code path explicitly. Either add a GPU-capable worker to the
+cluster (a GCE VM with nested virt + GPU passthrough is a separate
+work item, not yet supported) or route the task outside the cluster
+entirely.
 
 ## Smoke test
 
