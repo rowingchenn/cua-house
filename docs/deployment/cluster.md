@@ -164,8 +164,10 @@ images:
     local:
       template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260413.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
+      version: "20260413"       # bump when re-baking; invalidates worker snapshot cache
       default_vcpus: 4
       default_memory_gb: 8
+      default_disk_gb: 64       # used when client/pool-spec omits disk_gb
 ```
 
 ## Startup sequence
@@ -237,15 +239,17 @@ is in control.
 curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
   -H 'Content-Type: application/json' \
   -d '{"assignments":[
-    {"worker_id":"kvm02","image_key":"cpu-free","count":2,"vcpus":4,"memory_gb":8},
-    {"worker_id":"kvm03","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8}
+    {"worker_id":"kvm02","image_key":"cpu-free","count":2,"vcpus":4,"memory_gb":8,"disk_gb":64},
+    {"worker_id":"kvm03","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8,"disk_gb":64}
   ]}'
 ```
 
 Within one reconciler tick (default 5s) master sends `ADD_IMAGE` +
-`ADD_VM` pool ops over WS; workers pull templates from GCS if missing and
-boot VMs via docker+qemu+QMP loadvm. Expect ~30–60s until the first VM
-shows `state: ready` in `GET /v1/cluster/workers`.
+`ADD_VM` pool ops over WS. If the worker already has a snapshot-cache
+entry for this shape (image + version + vcpus + memory + disk), it
+reflinks and boots via `-loadvm` in seconds. On a cache miss (first-ever
+shape on this worker), it cold-boots from the base template (~4-5 min),
+saves the snapshot to cache, and reports `state: ready`.
 
 Desired state is **persisted to `runtime_root/cluster-pool-spec.json`**,
 so master restarts preserve pool sizing.

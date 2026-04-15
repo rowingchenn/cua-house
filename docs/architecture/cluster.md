@@ -225,7 +225,7 @@ Separate asyncio task on master. Wakes every 1s or on
 Worker's `EnvScheduler` is unchanged from standalone for lease
 lifecycle. The integration points are three new methods:
 
-* `register_external_vm(handle, snapshot_name, cpu, mem)` — add a
+* `register_external_vm(handle, snapshot_name, vcpus, memory_gb)` — add a
   hot-plug VM into `_vms` so `_find_free_vm_locked`, staging, revert,
   and the lease reaper all work on it.
 * `unregister_external_vm(vm_id)` — remove it on `REMOVE_VM` (refuses
@@ -307,6 +307,43 @@ for the same image only pull once.
   currently rely on VPC firewall rules (see
   [deployment/cluster.md](../deployment/cluster.md)) for network
   isolation. No TLS between master and worker.
+
+## Shape-aware pool & worker-local snapshot cache
+
+A **shape** is the tuple `(image, image_version, vcpus, memory_gb,
+disk_gb)`. It is the scheduling unit — dispatcher, pool spec, and
+reconciler all key on the full tuple.
+
+### Dispatch matching
+
+`ClusterDispatcher._pick_worker` selects a worker VM that satisfies
+`image == req.image AND vcpus >= req.vcpus AND memory_gb >= req.memory_gb
+AND disk_gb >= req.disk_gb AND state == "ready"`. Among candidates it
+prefers smallest-fit (avoid wasting a large VM on a small task), then
+least-leased worker.
+
+If no VM matches, the task stays `QUEUED`. There is no implicit scale-up
+or silent GCP overflow — operator sets the pool spec.
+
+### Worker-local snapshot cache
+
+GCS holds only base images (no per-shape savevm snapshots). The first
+time a worker boots a VM for a never-seen shape, it cold-boots (~4-5
+min) and QMP savevm's into the slot qcow2. That slot is then reflinked
+into the cache directory at
+`<snapshot_cache_dir>/<image>/v<version>/<vcpus>vcpu-<memory>gb-<disk>gb.qcow2`.
+
+The next `add_vm` for the same shape finds the cached qcow2, reflinks it
+to the new slot, and uses `-loadvm` to resume in seconds.
+
+Cache invalidation triggers:
+- **Image version bump** — new `version:` in catalog; old cache dirs are
+  purged on next `ADD_IMAGE`.
+- **QEMU/docker upgrade** — `qemu_fingerprint` (sha256 of qemu version +
+  docker image id) stored per sidecar; startup sweep evicts mismatches.
+
+Cache write failure is non-fatal: the VM still serves tasks normally,
+the next `add_vm` will cold-boot again. No data loss scenario.
 
 ## What's deliberately NOT in the cluster
 
