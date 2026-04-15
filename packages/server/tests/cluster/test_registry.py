@@ -21,7 +21,7 @@ class _FakeWS:
 
 
 def _cap() -> WorkerCapacity:
-    return WorkerCapacity(total_cpu_cores=4, total_memory_gb=16, total_disk_gb=100)
+    return WorkerCapacity(total_vcpus=4, total_memory_gb=16, total_disk_gb=100)
 
 
 @pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_heartbeat_updates_vm_summaries() -> None:
         ws=ws,  # type: ignore[arg-type]
     )
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", cpu_cores=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
     ]
     await reg.apply_heartbeat("w1", load_cpu=0.2, load_memory=0.3, vm_summaries=vms)
     session = await reg.get("w1")
@@ -92,8 +92,8 @@ async def test_free_vm_for_matches_only_ready() -> None:
     await reg.apply_heartbeat(
         "w1", load_cpu=0.0, load_memory=0.0,
         vm_summaries=[
-            WorkerVMSummary(vm_id="v1", image_key="cpu-free", cpu_cores=4, memory_gb=8, state="leased"),
-            WorkerVMSummary(vm_id="v2", image_key="cpu-free", cpu_cores=8, memory_gb=16, state="ready"),
+            WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="leased"),
+            WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=8, memory_gb=16, state="ready"),
         ],
     )
     session = await reg.get("w1")

@@ -30,10 +30,10 @@ from pydantic import BaseModel, Field
 class WorkerCapacity(BaseModel):
     """Static resource ceiling reported at registration."""
 
-    total_cpu_cores: int
+    total_vcpus: int
     total_memory_gb: int
     total_disk_gb: int
-    reserved_cpu_cores: int = 0
+    reserved_vcpus: int = 0
     reserved_memory_gb: int = 0
 
 
@@ -42,7 +42,7 @@ class WorkerVMSummary(BaseModel):
 
     vm_id: str
     image_key: str
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     state: str  # mirrors VMState enum values
     lease_id: str | None = None
@@ -64,7 +64,7 @@ class PoolOpArgs(BaseModel):
     image_key: str | None = None
     image_spec: dict[str, Any] | None = None  # serialized ImageSpec
     vm_id: str | None = None
-    cpu_cores: int | None = None
+    vcpus: int | None = None
     memory_gb: int | None = None
     count: int | None = None
 
@@ -179,7 +179,7 @@ class AssignTask(BaseModel):
     vm_id: str
     image_key: str
     task_path: str | None = None
-    cpu_cores: int | None = None
+    vcpus: int | None = None
     memory_gb: int | None = None
     task_data: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

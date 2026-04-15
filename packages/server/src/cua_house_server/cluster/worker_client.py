@@ -225,10 +225,10 @@ class WorkerClusterClient:
         except Exception:
             total_cpu, total_mem, total_disk = 1, 1, 1
         capacity = WorkerCapacity(
-            total_cpu_cores=total_cpu,
+            total_vcpus=total_cpu,
             total_memory_gb=total_mem,
             total_disk_gb=total_disk,
-            reserved_cpu_cores=host_config.host_reserved_cpu_cores,
+            reserved_vcpus=host_config.host_reserved_vcpus,
             reserved_memory_gb=host_config.host_reserved_memory_gb,
         )
         return Register(
@@ -328,14 +328,14 @@ class WorkerClusterClient:
                 return True, None, None
 
             if op.op == "ADD_VM":
-                if args.image_key is None or args.cpu_cores is None or args.memory_gb is None:
-                    return False, "image_key, cpu_cores, memory_gb required", None
+                if args.image_key is None or args.vcpus is None or args.memory_gb is None:
+                    return False, "image_key, vcpus, memory_gb required", None
                 image = self._catalog_lookup(args.image_key)
                 if image is None:
                     return False, f"unknown image {args.image_key}", None
                 handle = await self.runtime.add_vm(
                     image=image,
-                    cpu_cores=args.cpu_cores,
+                    vcpus=args.vcpus,
                     memory_gb=args.memory_gb,
                 )
                 # Make the hot-plug VM visible to the local EnvScheduler so
@@ -344,13 +344,13 @@ class WorkerClusterClient:
                 await self.scheduler.register_external_vm(
                     handle,
                     snapshot_name=args.image_key,
-                    cpu_cores=args.cpu_cores,
+                    vcpus=args.vcpus,
                     memory_gb=args.memory_gb,
                 )
                 self._vm_summaries[handle.vm_id] = WorkerVMSummary(
                     vm_id=handle.vm_id,
                     image_key=args.image_key,
-                    cpu_cores=handle.cpu_cores,
+                    vcpus=handle.vcpus,
                     memory_gb=handle.memory_gb,
                     state="ready",
                     public_host=self.public_host,
@@ -397,7 +397,7 @@ class WorkerClusterClient:
                 task_id=msg.task_id,
                 task_path=msg.task_path or msg.task_id,
                 snapshot_name=msg.image_key,
-                cpu_cores=msg.cpu_cores or 0,
+                vcpus=msg.vcpus or 0,
                 memory_gb=msg.memory_gb or 0,
                 task_data=task_data,
                 metadata=dict(msg.metadata),

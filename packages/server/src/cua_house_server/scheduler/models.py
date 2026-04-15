@@ -29,7 +29,7 @@ class VMRecord(BaseModel):
     vm_id: str
     snapshot_name: str
     state: VMState
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     container_name: str
     published_ports: dict[int, int] = Field(default_factory=dict)

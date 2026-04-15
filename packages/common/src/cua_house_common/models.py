@@ -56,7 +56,7 @@ class TaskRequirement(BaseModel):
     task_id: str
     task_path: str
     snapshot_name: str
-    cpu_cores: int | None = None
+    vcpus: int | None = None
     memory_gb: int | None = None
     machine_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -65,7 +65,7 @@ class TaskRequirement(BaseModel):
     # property declared in images.yaml as `os_family`. Server reads it from the
     # catalog by snapshot_name. See docs/architecture/overview.md.
     #
-    # NOTE: ``cpu_cores`` / ``memory_gb`` take precedence over the image's
+    # NOTE: ``vcpus`` / ``memory_gb`` take precedence over the image's
     # defaults when set by the client (e.g. agenthle after parsing the task
     # card's ``vm.machineType``). Legacy clients that still send ``machine_type``
     # as a string are accepted — the value is stored for auditing but not
@@ -132,7 +132,7 @@ class TaskStatus(BaseModel):
     task_path: str
     snapshot_name: str
     machine_type: str | None = None
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskRequirement.TaskDataRequest | None = None
@@ -183,5 +183,5 @@ class VMPoolEntry(BaseModel):
 
     snapshot_name: str
     count: int = 1
-    cpu_cores: int = 4
+    vcpus: int = 4
     memory_gb: int = 8

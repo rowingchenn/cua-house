@@ -340,7 +340,7 @@ spec.setdefault('assignments', []).append({
     'worker_id': os.environ['NEW_ID'],
     'image_key': 'cpu-free',
     'count': 1,
-    'cpu_cores': 4,
+    'vcpus': 4,
     'memory_gb': 8,
 })
 print(json.dumps(spec))
@@ -357,7 +357,7 @@ else
     info "  curl -sS ${MASTER_HTTP}/v1/cluster/pool > /tmp/pool.json"
     info "  python3 -c \"import json; d=json.load(open('/tmp/pool.json')); \\"
     info "    d['assignments'].append({'worker_id':'${NEW_ID}','image_key':'cpu-free',\\"
-    info "    'count':1,'cpu_cores':4,'memory_gb':8}); print(json.dumps(d))\" > /tmp/pool-new.json"
+    info "    'count':1,'vcpus':4,'memory_gb':8}); print(json.dumps(d))\" > /tmp/pool-new.json"
     info "  curl -sS -X PUT ${MASTER_HTTP}/v1/cluster/pool \\"
     info "    -H 'Content-Type: application/json' -d @/tmp/pool-new.json"
 fi

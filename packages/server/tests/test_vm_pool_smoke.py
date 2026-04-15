@@ -41,7 +41,7 @@ async def main():
     images = load_image_catalog(config_dir / "agenthle_env_images.yaml")
 
     # Use a single VM for the smoke test
-    pool = [VMPoolEntry(image_key="cpu-free", count=1, cpu_cores=4, memory_gb=8)]
+    pool = [VMPoolEntry(image_key="cpu-free", count=1, vcpus=4, memory_gb=8)]
 
     runtime = DockerQemuRuntime(config)
 

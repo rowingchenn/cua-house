@@ -98,7 +98,7 @@ public_base_host: <same>
 runtime_root: /home/weichen/cua-house-mnc/runtime
 task_data_root: null            # master doesn't host task data
 docker_image: trycua/cua-qemu-windows:latest
-host_reserved_cpu_cores: 1
+host_reserved_vcpus: 1
 host_reserved_memory_gb: 1
 batch_heartbeat_ttl_s: 3600
 heartbeat_ttl_s: 3600
@@ -126,7 +126,7 @@ public_base_host: <same>
 runtime_root: /mnt/xfs/runtime-cluster    # separate from standalone runtime_root
 task_data_root: /mnt/agenthle-task-data   # the OverlayFS merged view
 docker_image: trycua/cua-qemu-windows:latest
-host_reserved_cpu_cores: 2
+host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
 batch_heartbeat_ttl_s: 7200
 heartbeat_ttl_s: 7200
@@ -164,7 +164,7 @@ images:
     local:
       template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260413.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
-      default_cpu_cores: 4
+      default_vcpus: 4
       default_memory_gb: 8
 ```
 
@@ -237,8 +237,8 @@ is in control.
 curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
   -H 'Content-Type: application/json' \
   -d '{"assignments":[
-    {"worker_id":"kvm02","image_key":"cpu-free","count":2,"cpu_cores":4,"memory_gb":8},
-    {"worker_id":"kvm03","image_key":"cpu-free","count":1,"cpu_cores":4,"memory_gb":8}
+    {"worker_id":"kvm02","image_key":"cpu-free","count":2,"vcpus":4,"memory_gb":8},
+    {"worker_id":"kvm03","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8}
   ]}'
 ```
 
@@ -259,7 +259,7 @@ curl -sS -X POST http://<master>:8787/v1/batches \
     "task_id":"my-task",
     "task_path":"demo/demo_desktop_note",
     "snapshot_name":"cpu-free",
-    "cpu_cores":4,
+    "vcpus":4,
     "memory_gb":8
   }]}'
 ```
@@ -366,7 +366,7 @@ entirely.
 # 1. Desired state
 curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
   -H 'Content-Type: application/json' \
-  -d '{"assignments":[{"worker_id":"kvm02","image_key":"cpu-free","count":1,"cpu_cores":4,"memory_gb":8}]}'
+  -d '{"assignments":[{"worker_id":"kvm02","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8}]}'
 
 # 2. Wait ~60s for VM boot
 while [ "$(curl -sS http://<master>:8787/v1/cluster/status | jq .vm_instances)" != "1" ]; do sleep 5; done
@@ -374,7 +374,7 @@ while [ "$(curl -sS http://<master>:8787/v1/cluster/status | jq .vm_instances)" 
 # 3. Submit
 curl -sS -X POST http://<master>:8787/v1/batches \
   -H 'Content-Type: application/json' \
-  -d '{"batch_id":"smoke","tasks":[{"task_id":"smoke-t1","task_path":"demo","snapshot_name":"cpu-free","cpu_cores":4,"memory_gb":8}]}'
+  -d '{"batch_id":"smoke","tasks":[{"task_id":"smoke-t1","task_path":"demo","snapshot_name":"cpu-free","vcpus":4,"memory_gb":8}]}'
 
 # 4. Poll until ready
 while [ "$(curl -sS http://<master>:8787/v1/tasks/smoke-t1 | jq -r .state)" != "ready" ]; do sleep 2; done

@@ -278,7 +278,7 @@ def allocate_bake_lease(
     *,
     task_path: str,
     image_key: str,
-    cpu_cores: int,
+    vcpus: int,
     memory_gb: int,
 ) -> tuple[BakeLease, HeartbeatLoop]:
     task_id = f"image-bake-{int(time.time())}"
@@ -288,7 +288,7 @@ def allocate_bake_lease(
                 "task_id": task_id,
                 "task_path": task_path,
                 "image_key": image_key,
-                "cpu_cores": cpu_cores,
+                "vcpus": vcpus,
                 "memory_gb": memory_gb,
                 "metadata": {"purpose": "image-bake"},
             }
@@ -672,7 +672,7 @@ def main() -> int:
         api,
         task_path=args.task_path,
         image_key=args.image_key,
-        cpu_cores=args.cpu_cores,
+        vcpus=args.vcpus,
         memory_gb=args.memory_gb,
     )
 

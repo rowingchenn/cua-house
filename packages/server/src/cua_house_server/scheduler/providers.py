@@ -55,7 +55,7 @@ class SlotProvider(Protocol):
         self,
         *,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
     ) -> SlotCandidate | None:
         """Return a candidate slot if one can be offered right now."""

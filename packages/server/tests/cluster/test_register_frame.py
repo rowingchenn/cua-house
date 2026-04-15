@@ -22,7 +22,7 @@ def _host_config() -> HostRuntimeConfig:
         runtime_root=Path("/tmp/cua-house-test-runtime"),
         task_data_root=None,
         docker_image="",
-        host_reserved_cpu_cores=2,
+        host_reserved_vcpus=2,
         host_reserved_memory_gb=4,
         batch_heartbeat_ttl_s=60,
         heartbeat_ttl_s=60,
@@ -60,10 +60,10 @@ def test_build_register_frame_capacity_fields_populated() -> None:
     # psutil fills these from the machine running the test; we don't
     # assert exact numbers but they must be non-negative and the
     # reserved fields must match HostRuntimeConfig verbatim.
-    assert frame.capacity.total_cpu_cores >= 1
+    assert frame.capacity.total_vcpus >= 1
     assert frame.capacity.total_memory_gb >= 1
     assert frame.capacity.total_disk_gb >= 1
-    assert frame.capacity.reserved_cpu_cores == 2
+    assert frame.capacity.reserved_vcpus == 2
     assert frame.capacity.reserved_memory_gb == 4
 
 

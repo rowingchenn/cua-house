@@ -30,7 +30,7 @@ class LocalImageConfig:
 
     template_qcow2_path: Path
     gcs_uri: str | None = None
-    default_cpu_cores: int = 4
+    default_vcpus: int = 4
     default_memory_gb: int = 8
 
 
@@ -83,9 +83,9 @@ class ImageSpec:
         return "gcp"
 
     @property
-    def default_cpu_cores(self) -> int:
+    def default_vcpus(self) -> int:
         if self.local:
-            return self.local.default_cpu_cores
+            return self.local.default_vcpus
         return 4
 
     @property
@@ -165,7 +165,7 @@ class HostRuntimeConfig:
     runtime_root: Path
     task_data_root: Path | None
     docker_image: str
-    host_reserved_cpu_cores: int
+    host_reserved_vcpus: int
     host_reserved_memory_gb: int
     batch_heartbeat_ttl_s: int
     heartbeat_ttl_s: int
@@ -247,7 +247,7 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         runtime_root=Path(raw["runtime_root"]),
         task_data_root=Path(raw["task_data_root"]) if raw.get("task_data_root") else None,
         docker_image=raw.get("docker_image", "trycua/cua-qemu-windows:latest"),
-        host_reserved_cpu_cores=int(raw.get("host_reserved_cpu_cores", 2)),
+        host_reserved_vcpus=int(raw.get("host_reserved_vcpus", 2)),
         host_reserved_memory_gb=int(raw.get("host_reserved_memory_gb", 8)),
         batch_heartbeat_ttl_s=int(raw.get("batch_heartbeat_ttl_s", 120)),
         heartbeat_ttl_s=int(raw.get("heartbeat_ttl_s", 60)),
@@ -324,7 +324,7 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
             local_cfg = LocalImageConfig(
                 template_qcow2_path=Path(local_raw.get("template_qcow2_path") or ""),
                 gcs_uri=local_raw.get("gcs_uri"),
-                default_cpu_cores=int(local_raw.get("default_cpu_cores", 4)),
+                default_vcpus=int(local_raw.get("default_vcpus", 4)),
                 default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
             )
         if "gcp" in spec:

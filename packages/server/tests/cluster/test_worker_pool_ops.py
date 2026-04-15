@@ -24,7 +24,7 @@ from pathlib import Path
 @dataclass
 class _FakeHandle:
     vm_id: str
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     published_ports: dict[int, int] = field(default_factory=dict)
     novnc_port: int = 0
@@ -41,12 +41,12 @@ class _FakeRuntime:
     async def pull_template(self, image_key: str, image: Any) -> None:
         self.pulled.append(image_key)
 
-    async def add_vm(self, *, image: Any, cpu_cores: int, memory_gb: int,
+    async def add_vm(self, *, image: Any, vcpus: int, memory_gb: int,
                      snapshot_name: str | None = None) -> _FakeHandle:
         self._counter += 1
         vm_id = f"vm-{self._counter}"
-        self.added.append((image.key, cpu_cores, memory_gb))
-        return _FakeHandle(vm_id=vm_id, cpu_cores=cpu_cores, memory_gb=memory_gb)
+        self.added.append((image.key, vcpus, memory_gb))
+        return _FakeHandle(vm_id=vm_id, vcpus=vcpus, memory_gb=memory_gb)
 
     async def remove_vm(self, vm_id: str) -> None:
         self.removed.append(vm_id)
@@ -60,7 +60,7 @@ class _FakeScheduler:
     # Used by unregister refusal test
     refuse_unregister: set[str] = field(default_factory=set)
 
-    async def register_external_vm(self, handle, *, snapshot_name, cpu_cores, memory_gb):
+    async def register_external_vm(self, handle, *, snapshot_name, vcpus, memory_gb):
         self.registered.append(handle.vm_id)
 
     async def unregister_external_vm(self, vm_id: str) -> bool:
@@ -75,7 +75,7 @@ def _make_client(runtime: _FakeRuntime) -> WorkerClusterClient:
         host_id="h1", host_external_ip="127.0.0.1", public_base_host="127.0.0.1",
         runtime_root=Path("/tmp/cua-house-test"),
         task_data_root=None, docker_image="",
-        host_reserved_cpu_cores=0, host_reserved_memory_gb=0,
+        host_reserved_vcpus=0, host_reserved_memory_gb=0,
         batch_heartbeat_ttl_s=60, heartbeat_ttl_s=60, ready_timeout_s=60,
         readiness_poll_interval_s=1, idle_slot_ttl_s=60,
         published_port_range=(1, 2), novnc_port_range=(3, 4),
@@ -114,7 +114,7 @@ async def test_add_vm_calls_runtime_and_tracks_summary() -> None:
     client = _make_client(runtime)
     op = PoolOp(
         op_id="o1", op="ADD_VM",
-        args=PoolOpArgs(image_key="cpu-free", cpu_cores=4, memory_gb=8),
+        args=PoolOpArgs(image_key="cpu-free", vcpus=4, memory_gb=8),
     )
     ok, err, produced = await client._execute_pool_op(op)
     assert ok is True
@@ -131,7 +131,7 @@ async def test_remove_vm_clears_summary() -> None:
     client = _make_client(runtime)
     add_op = PoolOp(
         op_id="o1", op="ADD_VM",
-        args=PoolOpArgs(image_key="cpu-free", cpu_cores=4, memory_gb=8),
+        args=PoolOpArgs(image_key="cpu-free", vcpus=4, memory_gb=8),
     )
     _, _, produced = await client._execute_pool_op(add_op)
     assert produced is not None
@@ -149,7 +149,7 @@ async def test_remove_image_refuses_if_vms_still_running() -> None:
     client = _make_client(runtime)
     await client._execute_pool_op(PoolOp(
         op_id="o1", op="ADD_VM",
-        args=PoolOpArgs(image_key="cpu-free", cpu_cores=4, memory_gb=8),
+        args=PoolOpArgs(image_key="cpu-free", vcpus=4, memory_gb=8),
     ))
     ok, err, _ = await client._execute_pool_op(PoolOp(
         op_id="o2", op="REMOVE_IMAGE",

@@ -99,7 +99,7 @@ class EnvScheduler:
                     vm_id=handle.vm_id,
                     snapshot_name=handle.snapshot_name,
                     state=VMState.READY,
-                    cpu_cores=handle.cpu_cores,
+                    vcpus=handle.vcpus,
                     memory_gb=handle.memory_gb,
                     container_name=handle.container_name,
                     published_ports=handle.published_ports,
@@ -131,9 +131,9 @@ class EnvScheduler:
             for req in request.tasks:
                 if req.task_id in self._tasks:
                     raise ValueError(f"task_id already exists: {req.task_id}")
-                cpu_cores, memory_gb = self._resolve_resources(
+                vcpus, memory_gb = self._resolve_resources(
                     req.snapshot_name,
-                    cpu_cores=req.cpu_cores,
+                    vcpus=req.vcpus,
                     memory_gb=req.memory_gb,
                 )
                 task = TaskStatus(
@@ -141,7 +141,7 @@ class EnvScheduler:
                     task_path=req.task_path,
                     snapshot_name=req.snapshot_name,
                     machine_type=req.machine_type,
-                    cpu_cores=cpu_cores,
+                    vcpus=vcpus,
                     memory_gb=memory_gb,
                     metadata=req.metadata,
                     task_data=req.task_data,
@@ -153,11 +153,11 @@ class EnvScheduler:
                 # Only check host capacity for local mode
                 image = self.images.get(req.snapshot_name)
                 if image and image.local and "local" in self._runtimes:
-                    if not self._fits_host_total(cpu_cores, memory_gb):
+                    if not self._fits_host_total(vcpus, memory_gb):
                         task.state = TaskState.FAILED
                         task.error = (
-                            f"task requires {cpu_cores} vCPU / {memory_gb} GiB, exceeding host allocatable capacity "
-                            f"of {self._max_allocatable_cpu()} vCPU / {self._max_allocatable_memory_gb()} GiB"
+                            f"task requires {vcpus} vCPU / {memory_gb} GiB, exceeding host allocatable capacity "
+                            f"of {self._max_allocatable_vcpus()} vCPU / {self._max_allocatable_memory_gb()} GiB"
                         )
                         task.completed_at = created
                 self._tasks[task.task_id] = task
@@ -184,7 +184,7 @@ class EnvScheduler:
                         batch_id=batch_id,
                         task_id=task.task_id,
                         snapshot_name=task.snapshot_name,
-                        cpu_cores=task.cpu_cores,
+                        vcpus=task.vcpus,
                         memory_gb=task.memory_gb,
                         error=task.error,
                     )
@@ -195,7 +195,7 @@ class EnvScheduler:
                         task_id=task.task_id,
                         snapshot_name=task.snapshot_name,
                         machine_type=task.machine_type,
-                        cpu_cores=task.cpu_cores,
+                        vcpus=task.vcpus,
                         memory_gb=task.memory_gb,
                     )
         self._ensure_dispatch()
@@ -682,7 +682,7 @@ class EnvScheduler:
             handle = gcp_rt.prepare_slot(
                 slot_id=slot_id,
                 image=image,
-                cpu_cores=image.default_cpu_cores,
+                vcpus=image.default_vcpus,
                 memory_gb=image.default_memory_gb,
                 cua_port=5000,  # TODO multi-port GCP
                 novnc_port=0,
@@ -807,30 +807,30 @@ class EnvScheduler:
         self,
         snapshot_name: str,
         *,
-        cpu_cores: int | None = None,
+        vcpus: int | None = None,
         memory_gb: int | None = None,
     ) -> tuple[int, int]:
-        """Resolve cpu_cores and memory_gb for a task.
+        """Resolve vcpus and memory_gb for a task.
 
         Client-supplied values take precedence. When either is missing, fall
         back to the image defaults (local or GCP) or legacy vm_pool entries.
         """
         image = self.images.get(snapshot_name)
         if image is not None:
-            default_cpu = image.default_cpu_cores
+            default_cpu = image.default_vcpus
             default_mem = image.default_memory_gb
         else:
             default_cpu = None
             default_mem = None
             for entry in self.host_config.vm_pool:
                 if entry.snapshot_name == snapshot_name:
-                    default_cpu = entry.cpu_cores
+                    default_cpu = entry.vcpus
                     default_mem = entry.memory_gb
                     break
             if default_cpu is None:
                 raise ValueError(f"unknown snapshot_name: {snapshot_name}")
 
-        resolved_cpu = cpu_cores if cpu_cores is not None else default_cpu
+        resolved_cpu = vcpus if vcpus is not None else default_cpu
         resolved_mem = memory_gb if memory_gb is not None else default_mem
         return resolved_cpu, resolved_mem
 
@@ -849,11 +849,11 @@ class EnvScheduler:
             raise ValueError(f"image not enabled in this deployment: {image_key}")
         return image
 
-    def _fits_host_total(self, cpu_cores: int, memory_gb: int) -> bool:
-        return cpu_cores <= self._max_allocatable_cpu() and memory_gb <= self._max_allocatable_memory_gb()
+    def _fits_host_total(self, vcpus: int, memory_gb: int) -> bool:
+        return vcpus <= self._max_allocatable_vcpus() and memory_gb <= self._max_allocatable_memory_gb()
 
-    def _max_allocatable_cpu(self) -> int:
-        return max((os_cpu_count() - self.host_config.host_reserved_cpu_cores), 0)
+    def _max_allocatable_vcpus(self) -> int:
+        return max((os_cpu_count() - self.host_config.host_reserved_vcpus), 0)
 
     def _max_allocatable_memory_gb(self) -> int:
         return max((host_memory_gb() - self.host_config.host_reserved_memory_gb), 0)
@@ -924,7 +924,7 @@ class EnvScheduler:
         handle: VMHandle,
         *,
         snapshot_name: str,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
     ) -> None:
         """Inject a hot-plug VM into ``_vms`` so existing lease code sees it.
@@ -939,7 +939,7 @@ class EnvScheduler:
             vm_id=handle.vm_id,
             snapshot_name=snapshot_name,
             state=VMState.READY,
-            cpu_cores=cpu_cores,
+            vcpus=vcpus,
             memory_gb=memory_gb,
             container_name=handle.container_name,
             published_ports=handle.published_ports,
@@ -970,7 +970,7 @@ class EnvScheduler:
         task_id: str,
         task_path: str,
         snapshot_name: str,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         task_data: "TaskRequirement.TaskDataRequest | None",
         metadata: dict[str, Any],
@@ -997,7 +997,7 @@ class EnvScheduler:
                 task_id=task_id,
                 task_path=task_path,
                 snapshot_name=snapshot_name,
-                cpu_cores=cpu_cores,
+                vcpus=vcpus,
                 memory_gb=memory_gb,
                 metadata=metadata,
                 task_data=task_data,

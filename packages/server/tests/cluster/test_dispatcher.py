@@ -47,7 +47,7 @@ def _host_config() -> HostRuntimeConfig:
         runtime_root=Path("/tmp/cua-house-test-master"),
         task_data_root=None,
         docker_image="",
-        host_reserved_cpu_cores=0,
+        host_reserved_vcpus=0,
         host_reserved_memory_gb=0,
         batch_heartbeat_ttl_s=60,
         heartbeat_ttl_s=60,
@@ -63,7 +63,7 @@ def _host_config() -> HostRuntimeConfig:
 def _images() -> dict[str, ImageSpec]:
     local = LocalImageConfig(
         template_qcow2_path=Path("/tmp/template.qcow2"),
-        default_cpu_cores=4,
+        default_vcpus=4,
         default_memory_gb=8,
     )
     return {
@@ -116,7 +116,7 @@ async def _setup_dispatcher_with_worker(vm_available: bool = True):
     await registry.register(
         worker_id="w1",
         runtime_version="0.1",
-        capacity=WorkerCapacity(total_cpu_cores=16, total_memory_gb=64, total_disk_gb=500),
+        capacity=WorkerCapacity(total_vcpus=16, total_memory_gb=64, total_disk_gb=500),
         hosted_images=["cpu-free"],
         ws=worker,  # type: ignore[arg-type]
     )
@@ -129,7 +129,7 @@ async def _setup_dispatcher_with_worker(vm_available: bool = True):
                 WorkerVMSummary(
                     vm_id="vm-1",
                     image_key="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                     state="ready",
                 )
@@ -154,7 +154,7 @@ async def test_submit_batch_returns_ready_assignment_with_lease_endpoint() -> No
                     task_id="t1",
                     task_path="/tmp/t1",
                     snapshot_name="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                 )
             ]
@@ -167,7 +167,7 @@ async def test_submit_batch_returns_ready_assignment_with_lease_endpoint() -> No
     assert task.assignment.lease_endpoint == "http://worker.internal:8787"
     assert task.assignment.urls == {5000: "http://worker.internal:16001"}
     assert len(worker.assigned) == 1
-    assert worker.assigned[0].cpu_cores == 4
+    assert worker.assigned[0].vcpus == 4
 
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_no_capacity_keeps_task_queued() -> None:
                     task_id="t1",
                     task_path="/tmp/t1",
                     snapshot_name="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                 )
             ]
@@ -201,7 +201,7 @@ async def test_task_completed_message_updates_batch_state() -> None:
                     task_id="t1",
                     task_path="/tmp/t1",
                     snapshot_name="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                 )
             ]
@@ -232,7 +232,7 @@ async def test_worker_disconnect_fails_orphaned_tasks() -> None:
                     task_id="t1",
                     task_path="/tmp/t1",
                     snapshot_name="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                 )
             ]
@@ -257,7 +257,7 @@ async def test_cancel_batch_sends_release_lease_to_worker() -> None:
                     task_id="t1",
                     task_path="/tmp/t1",
                     snapshot_name="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=8,
                 )
             ]

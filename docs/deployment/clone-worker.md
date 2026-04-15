@@ -194,7 +194,7 @@ Quickest way to prove the new worker is taking traffic:
 # Submit a single-task batch
 BATCH_ID=$(curl -sS -X POST http://<master>:8787/v1/batches \
   -H 'Content-Type: application/json' \
-  -d '{"tasks":[{"task_id":"kvm04-smoke","task_path":"p","snapshot_name":"cpu-free","cpu_cores":4,"memory_gb":8}]}' \
+  -d '{"tasks":[{"task_id":"kvm04-smoke","task_path":"p","snapshot_name":"cpu-free","vcpus":4,"memory_gb":8}]}' \
   | jq -r .batch_id)
 
 # Wait for READY

@@ -97,15 +97,15 @@ class ClusterDispatcher:
             for req in request.tasks:
                 if req.task_id in self._tasks:
                     raise ValueError(f"task_id already exists: {req.task_id}")
-                cpu_cores, memory_gb = self._resolve_resources(
-                    req.snapshot_name, req.cpu_cores, req.memory_gb,
+                vcpus, memory_gb = self._resolve_resources(
+                    req.snapshot_name, req.vcpus, req.memory_gb,
                 )
                 task = TaskStatus(
                     task_id=req.task_id,
                     task_path=req.task_path,
                     snapshot_name=req.snapshot_name,
                     machine_type=req.machine_type,
-                    cpu_cores=cpu_cores,
+                    vcpus=vcpus,
                     memory_gb=memory_gb,
                     metadata=req.metadata,
                     task_data=req.task_data,
@@ -296,7 +296,7 @@ class ClusterDispatcher:
             vm_id=vm_id,
             image_key=task.snapshot_name,
             task_path=task.task_path,
-            cpu_cores=task.cpu_cores,
+            vcpus=task.vcpus,
             memory_gb=task.memory_gb,
             task_data=task.task_data.model_dump() if task.task_data else None,
             metadata=task.metadata,
@@ -352,7 +352,7 @@ class ClusterDispatcher:
         for session in sessions:
             if not session.online:
                 continue
-            vm = session.free_vm_for(task.snapshot_name, task.cpu_cores, task.memory_gb)
+            vm = session.free_vm_for(task.snapshot_name, task.vcpus, task.memory_gb)
             if vm is None:
                 continue
             leased_count = sum(1 for v in session.vm_summaries if v.state == "leased")
@@ -418,13 +418,13 @@ class ClusterDispatcher:
     def _resolve_resources(
         self,
         snapshot_name: str,
-        cpu_cores: int | None,
+        vcpus: int | None,
         memory_gb: int | None,
     ) -> tuple[int, int]:
         image = self.images.get(snapshot_name)
         if image is None:
             raise ValueError(f"unknown snapshot_name: {snapshot_name}")
         return (
-            cpu_cores if cpu_cores is not None else image.default_cpu_cores,
+            vcpus if vcpus is not None else image.default_vcpus,
             memory_gb if memory_gb is not None else image.default_memory_gb,
         )

@@ -23,7 +23,7 @@ class PoolAssignmentModel(BaseModel):
     worker_id: str
     image_key: str
     count: int
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
 
 
@@ -65,7 +65,7 @@ def build_cluster_api_router(
                     worker_id=a.worker_id,
                     image_key=a.image_key,
                     count=a.count,
-                    cpu_cores=a.cpu_cores,
+                    vcpus=a.vcpus,
                     memory_gb=a.memory_gb,
                 )
                 for a in pool_spec.assignments
@@ -80,7 +80,7 @@ def build_cluster_api_router(
                     worker_id=a.worker_id,
                     image_key=a.image_key,
                     count=a.count,
-                    cpu_cores=a.cpu_cores,
+                    vcpus=a.vcpus,
                     memory_gb=a.memory_gb,
                 )
                 for a in spec.assignments

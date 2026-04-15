@@ -344,7 +344,7 @@ gpu-free:
   gcp_data_disk_gb: 200
   gpu_type: nvidia-l4
   gpu_count: 1
-  default_cpu_cores: 4
+  default_vcpus: 4
   default_memory_gb: 16
   max_concurrent_vms: 2
 ```

@@ -27,7 +27,7 @@ class GCPSlotHandle:
 
     slot_id: str
     image_key: str
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     task_id: str
     lease_id: str
@@ -72,7 +72,7 @@ class GCPVMRuntime:
         *,
         slot_id: str,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         cua_port: int,
         novnc_port: int,
@@ -84,7 +84,7 @@ class GCPVMRuntime:
         handle = GCPSlotHandle(
             slot_id=slot_id,
             image_key=image.key,
-            cpu_cores=cpu_cores,
+            vcpus=vcpus,
             memory_gb=memory_gb,
             task_id=task_id,
             lease_id=lease_id,

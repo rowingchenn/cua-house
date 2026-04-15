@@ -30,7 +30,7 @@ docker_image: trycua/cua-qemu-windows:latest
 
 # Leave some headroom for the dockur container supervisor + systemd +
 # journald. Tune per machine shape; kvm02/03 use these values.
-host_reserved_cpu_cores: 2
+host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
 
 # Generous TTLs because agent tasks may run for tens of minutes; the

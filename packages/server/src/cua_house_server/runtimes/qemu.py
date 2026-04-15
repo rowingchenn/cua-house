@@ -28,7 +28,7 @@ class VMHandle:
 
     vm_id: str
     snapshot_name: str
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
     # guest_port → host_loopback_port for every port in the image's published_ports.
     published_ports: dict[int, int]
@@ -283,7 +283,7 @@ class DockerQemuRuntime:
                 prepare_args.append(dict(
                     vm_id=vm_id,
                     image=image,
-                    cpu_cores=entry.cpu_cores,
+                    vcpus=entry.vcpus,
                     memory_gb=entry.memory_gb,
                     published_ports=published_ports,
                     novnc_port=novnc_port,
@@ -382,7 +382,7 @@ class DockerQemuRuntime:
         *,
         vm_id: str,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         published_ports: dict[int, int],
         novnc_port: int,
@@ -411,7 +411,7 @@ class DockerQemuRuntime:
         return VMHandle(
             vm_id=vm_id,
             snapshot_name=snapshot_name,
-            cpu_cores=cpu_cores,
+            vcpus=vcpus,
             memory_gb=memory_gb,
             published_ports=published_ports,
             novnc_port=novnc_port,
@@ -454,7 +454,7 @@ class DockerQemuRuntime:
             cmd.extend(["-p", f"{self.config.vm_bind_address}:{host_port}:{guest_port}"])
         cmd.extend([
             "-e", f"RAM_SIZE={handle.memory_gb}G",
-            "-e", f"CPU_CORES={handle.cpu_cores}",
+            "-e", f"CPU_CORES={handle.vcpus}",
             # Snapshot-compatible CPU settings
             "-e", "CPU_MODEL=host",  # removes migratable=no
             "-e", "HV=N",  # removes hv_passthrough
@@ -473,7 +473,7 @@ class DockerQemuRuntime:
             vm_id=handle.vm_id,
             container_name=handle.container_name,
             snapshot_name=handle.snapshot_name,
-            cpu_cores=handle.cpu_cores,
+            vcpus=handle.vcpus,
             memory_gb=handle.memory_gb,
         )
         result = self._run(cmd)
@@ -632,7 +632,7 @@ class DockerQemuRuntime:
         new_handle = self._prepare_vm(
             vm_id=handle.vm_id,
             image=image,
-            cpu_cores=handle.cpu_cores,
+            vcpus=handle.vcpus,
             memory_gb=handle.memory_gb,
             published_ports=handle.published_ports,
             novnc_port=handle.novnc_port,
@@ -656,7 +656,7 @@ class DockerQemuRuntime:
         self,
         *,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         snapshot_name: str | None = None,
     ) -> VMHandle:
@@ -685,7 +685,7 @@ class DockerQemuRuntime:
                 self._prepare_vm,
                 vm_id=vm_id,
                 image=image,
-                cpu_cores=cpu_cores,
+                vcpus=vcpus,
                 memory_gb=memory_gb,
                 published_ports=published_ports,
                 novnc_port=novnc_port,
@@ -711,7 +711,7 @@ class DockerQemuRuntime:
             "vm_hot_added",
             vm_id=vm_id,
             snapshot_name=snapshot,
-            cpu_cores=cpu_cores,
+            vcpus=vcpus,
             memory_gb=memory_gb,
         )
         return handle

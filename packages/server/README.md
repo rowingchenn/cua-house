@@ -50,7 +50,7 @@ Key fields:
 | `runtime_root` | Directory for overlays, logs, events |
 | `task_data_root` | Directory with task input/reference data |
 | `docker_image` | Docker image for QEMU containers |
-| `vm_pool` | List of `{image_key, count, cpu_cores, memory_gb}` for snapshot pool |
+| `vm_pool` | List of `{image_key, count, vcpus, memory_gb}` for snapshot pool |
 | `heartbeat_ttl_s` | Lease heartbeat timeout (default: 60s) |
 | `batch_heartbeat_ttl_s` | Batch heartbeat timeout (default: 30s) |
 | `ready_timeout_s` | Max wait for VM boot (default: 900s) |

@@ -21,7 +21,7 @@ async def main() -> None:
                     task_id="example-task-001",
                     task_path="tasks/demo",
                     image_key="cpu-free",
-                    cpu_cores=4,
+                    vcpus=4,
                     memory_gb=16,
                 ),
             ]

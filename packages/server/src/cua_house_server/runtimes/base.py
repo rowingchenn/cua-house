@@ -22,7 +22,7 @@ class RuntimeBackend(Protocol):
         *,
         slot_id: str,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         cua_port: int,
         novnc_port: int,

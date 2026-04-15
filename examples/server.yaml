@@ -29,7 +29,7 @@ docker_image: trycua/cua-qemu-windows:latest
 
 # Host resources reserved (not allocated to VMs).
 # Available = total - reserved. Tasks exceeding available are rejected.
-host_reserved_cpu_cores: 2
+host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
 
 # Batch heartbeat TTL in seconds.
@@ -62,7 +62,7 @@ novnc_port_range: [18000, 18999]
 vm_pool:
   - image_key: cpu-free
     count: 3
-    cpu_cores: 4
+    vcpus: 4
     memory_gb: 16
 
 # Snapshot settings (only used with vm_pool)

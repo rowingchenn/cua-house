@@ -51,14 +51,14 @@ class WorkerSession:
     load_memory: float = 0.0
     online: bool = True
 
-    def free_vm_for(self, image_key: str, cpu_cores: int, memory_gb: int) -> WorkerVMSummary | None:
+    def free_vm_for(self, image_key: str, vcpus: int, memory_gb: int) -> WorkerVMSummary | None:
         """Return a READY VM matching the request, if any."""
         for vm in self.vm_summaries:
             if vm.state != "ready":
                 continue
             if vm.image_key != image_key:
                 continue
-            if vm.cpu_cores >= cpu_cores and vm.memory_gb >= memory_gb:
+            if vm.vcpus >= vcpus and vm.memory_gb >= memory_gb:
                 return vm
         return None
 
@@ -101,7 +101,7 @@ class WorkerRegistry:
             logger.info(
                 "Worker %s registered (cpu=%d mem=%dGB images=%s)",
                 worker_id,
-                capacity.total_cpu_cores,
+                capacity.total_vcpus,
                 capacity.total_memory_gb,
                 sorted(hosted_images),
             )

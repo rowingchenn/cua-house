@@ -214,7 +214,7 @@ class PoolReconciler:
             args=PoolOpArgs(
                 image_key=entry.image_key,
                 vm_id=entry.vm_id,
-                cpu_cores=entry.cpu_cores,
+                vcpus=entry.vcpus,
                 memory_gb=entry.memory_gb,
             ),
         )
@@ -254,7 +254,7 @@ class PoolReconciler:
                 WorkerVMSummary(
                     vm_id=result.produced_vm_id,
                     image_key=entry.image_key,
-                    cpu_cores=entry.cpu_cores or 0,
+                    vcpus=entry.vcpus or 0,
                     memory_gb=entry.memory_gb or 0,
                     state="ready",
                 )

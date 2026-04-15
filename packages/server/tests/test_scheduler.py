@@ -26,7 +26,7 @@ class FakeRuntime:
         *,
         slot_id: str,
         image: ImageSpec,
-        cpu_cores: int,
+        vcpus: int,
         memory_gb: int,
         cua_port: int,
         novnc_port: int,
@@ -40,7 +40,7 @@ class FakeRuntime:
         handle = Handle()
         handle.slot_id = slot_id
         handle.image_key = image.key
-        handle.cpu_cores = cpu_cores
+        handle.vcpus = vcpus
         handle.memory_gb = memory_gb
         handle.published_ports = {cua_port: cua_port}
         handle.novnc_port = novnc_port
@@ -98,7 +98,7 @@ def make_scheduler() -> EnvScheduler:
         runtime_root=Path("/tmp/cua-house-env-tests"),
         task_data_root=Path("/tmp/agenthle-task-data"),
         docker_image="trycua/cua-qemu-windows:latest",
-        host_reserved_cpu_cores=2,
+        host_reserved_vcpus=2,
         host_reserved_memory_gb=8,
         batch_heartbeat_ttl_s=30,
         heartbeat_ttl_s=30,
@@ -114,14 +114,14 @@ def make_scheduler() -> EnvScheduler:
             enabled=True,
             os_family="windows",
             published_ports=(5000,),
-            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=4, default_memory_gb=16),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_vcpus=4, default_memory_gb=16),
         ),
         "cpu-huge": ImageSpec(
             key="cpu-huge",
             enabled=True,
             os_family="windows",
             published_ports=(5000,),
-            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=9999, default_memory_gb=9999),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_vcpus=9999, default_memory_gb=9999),
         ),
     }
     rt = FakeRuntime(host)
@@ -148,7 +148,7 @@ def _register_fake_pool(sched: EnvScheduler, images: dict, n_per_image: int = 2)
             handle = FakeHandle()
             handle.vm_id = vm_id
             handle.snapshot_name = key
-            handle.cpu_cores = image.default_cpu_cores
+            handle.vcpus = image.default_vcpus
             handle.memory_gb = image.default_memory_gb
             handle.published_ports = published_ports
             handle.novnc_port = 18000 + i
@@ -160,7 +160,7 @@ def _register_fake_pool(sched: EnvScheduler, images: dict, n_per_image: int = 2)
                 vm_id=vm_id,
                 snapshot_name=key,
                 state=VMState.READY,
-                cpu_cores=image.default_cpu_cores,
+                vcpus=image.default_vcpus,
                 memory_gb=image.default_memory_gb,
                 container_name=handle.container_name,
                 published_ports=published_ports,
@@ -178,7 +178,7 @@ def make_slow_scheduler() -> EnvScheduler:
         runtime_root=Path("/tmp/cua-house-env-tests"),
         task_data_root=Path("/tmp/agenthle-task-data"),
         docker_image="trycua/cua-qemu-windows:latest",
-        host_reserved_cpu_cores=2,
+        host_reserved_vcpus=2,
         host_reserved_memory_gb=8,
         batch_heartbeat_ttl_s=1,
         heartbeat_ttl_s=1,
@@ -194,7 +194,7 @@ def make_slow_scheduler() -> EnvScheduler:
             enabled=True,
             os_family="windows",
             published_ports=(5000,),
-            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_cpu_cores=4, default_memory_gb=16),
+            local=LocalImageConfig(template_qcow2_path=Path("/tmp/golden.qcow2"), default_vcpus=4, default_memory_gb=16),
         ),
     }
     rt = SlowFakeRuntime(host)
@@ -233,7 +233,7 @@ def test_scheduler_defaults_and_grouping() -> None:
                 ]
             )
         )
-        assert batch.tasks[0].cpu_cores == 4
+        assert batch.tasks[0].vcpus == 4
         assert batch.tasks[0].memory_gb == 16
 
         await wait_for_assignment(scheduler, "task-a")
@@ -483,7 +483,7 @@ def test_runtime_cleanup_orphaned_state(tmp_path: Path) -> None:
         runtime_root=runtime_root,
         task_data_root=tmp_path / "task-data",
         docker_image="trycua/cua-qemu-windows:latest",
-        host_reserved_cpu_cores=2,
+        host_reserved_vcpus=2,
         host_reserved_memory_gb=8,
         batch_heartbeat_ttl_s=30,
         heartbeat_ttl_s=30,
@@ -532,7 +532,7 @@ def test_runtime_prepare_slot_uses_container_visible_backing_file(tmp_path: Path
         runtime_root=runtime_root,
         task_data_root=tmp_path / "task-data",
         docker_image="trycua/cua-qemu-windows:latest",
-        host_reserved_cpu_cores=2,
+        host_reserved_vcpus=2,
         host_reserved_memory_gb=8,
         batch_heartbeat_ttl_s=30,
         heartbeat_ttl_s=30,
@@ -565,9 +565,9 @@ def test_runtime_prepare_slot_uses_container_visible_backing_file(tmp_path: Path
             enabled=True,
             os_family="windows",
             published_ports=(5000,),
-            local=LocalImageConfig(template_qcow2_path=golden, default_cpu_cores=4, default_memory_gb=16),
+            local=LocalImageConfig(template_qcow2_path=golden, default_vcpus=4, default_memory_gb=16),
         ),
-        cpu_cores=4,
+        vcpus=4,
         memory_gb=16,
         published_ports={5000: 16000},
         novnc_port=18000,

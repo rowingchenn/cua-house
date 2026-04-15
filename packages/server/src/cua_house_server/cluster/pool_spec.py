@@ -35,7 +35,7 @@ class PoolAssignment:
     worker_id: str
     image_key: str
     count: int
-    cpu_cores: int
+    vcpus: int
     memory_gb: int
 
 
@@ -89,7 +89,7 @@ class ClusterPoolSpec:
                     worker_id=str(item["worker_id"]),
                     image_key=str(item["image_key"]),
                     count=int(item["count"]),
-                    cpu_cores=int(item["cpu_cores"]),
+                    vcpus=int(item["vcpus"]),
                     memory_gb=int(item["memory_gb"]),
                 ))
             except (KeyError, TypeError, ValueError) as exc:
@@ -118,7 +118,7 @@ class DiffEntry:
     op: str  # ADD_IMAGE | REMOVE_IMAGE | ADD_VM | REMOVE_VM
     image_key: str | None = None
     vm_id: str | None = None
-    cpu_cores: int | None = None
+    vcpus: int | None = None
     memory_gb: int | None = None
 
 
@@ -156,11 +156,11 @@ def compute_diff(
         # treat each (cpu, mem) as its own bucket.
         desired_buckets: dict[tuple[int, int], int] = {}
         for a in assignments:
-            key = (a.cpu_cores, a.memory_gb)
+            key = (a.vcpus, a.memory_gb)
             desired_buckets[key] = desired_buckets.get(key, 0) + a.count
         actual_buckets: dict[tuple[int, int], list[WorkerVMSummary]] = {}
         for vm in actual_by_image.get(image_key, []):
-            key = (vm.cpu_cores, vm.memory_gb)
+            key = (vm.vcpus, vm.memory_gb)
             actual_buckets.setdefault(key, []).append(vm)
 
         for key, want in desired_buckets.items():
@@ -171,7 +171,7 @@ def compute_diff(
                         worker_id=worker_id,
                         op="ADD_VM",
                         image_key=image_key,
-                        cpu_cores=key[0],
+                        vcpus=key[0],
                         memory_gb=key[1],
                     )
                 )
@@ -218,7 +218,7 @@ def diff_to_envelope(entry: DiffEntry) -> Envelope:
         args=PoolOpArgs(
             image_key=entry.image_key,
             vm_id=entry.vm_id,
-            cpu_cores=entry.cpu_cores,
+            vcpus=entry.vcpus,
             memory_gb=entry.memory_gb,
         ),
     )
