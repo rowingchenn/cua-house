@@ -146,6 +146,10 @@ class WorkerClusterClient:
     async def start(self) -> None:
         if self._supervisor is not None:
             return
+        if hasattr(self.runtime, '_snapshot_cache'):
+            evicted = self.runtime._snapshot_cache.sweep_on_startup()
+            if evicted:
+                logger.info("snapshot cache sweep evicted %d stale entries", len(evicted))
         self._supervisor = asyncio.create_task(self._run_forever())
 
     async def stop(self) -> None:

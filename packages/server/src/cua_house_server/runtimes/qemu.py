@@ -47,6 +47,7 @@ class VMHandle:
     lease_id: str = ""
     started_at: datetime | None = None
     task_data_source_root: Path | None = None
+    from_cache: bool = False
 
     @property
     def slot_id(self) -> str:
@@ -65,18 +66,20 @@ class DockerQemuRuntime:
             component="env_server",
         )
         self.task_data = TaskDataManager(self.config.task_data_root, self.event_logger)
-        # Serializes mutations on shared disk/container state when multiple
-        # VMs are being prepared / started concurrently (hot-plug path).
         self._mutation_lock = asyncio.Lock()
-        # Port pools owned by the runtime so hot-add can allocate outside of
-        # initialize_pool. In standalone mode initialize_pool reuses these.
         from cua_house_server._internal.port_pool import PortPool
         self._published_port_pool = PortPool(*self.config.published_port_range)
         self._novnc_port_pool = PortPool(*self.config.novnc_port_range)
-        # Tracks VMs added via hot-plug so remove_vm can locate them. Static
-        # pools created via initialize_pool aren't tracked here (the scheduler
-        # owns them through its own dicts).
         self._hotplug_handles: dict[str, VMHandle] = {}
+        # Snapshot cache for shape-keyed loadvm acceleration (cluster mode).
+        from cua_house_server.runtimes.snapshot_cache import SnapshotCache, compute_qemu_fingerprint
+        cache_dir = config.snapshot_cache_dir or (config.runtime_root / "snapshot-cache")
+        try:
+            fp = compute_qemu_fingerprint(config.docker_image)
+        except Exception:
+            fp = "unknown"
+        self._snapshot_cache = SnapshotCache(cache_dir, fp)
+        self._qemu_fingerprint = fp
 
     @property
     def slots_root(self) -> Path:
@@ -438,16 +441,58 @@ class DockerQemuRuntime:
             container_name=container_name,
         )
 
-    async def _start_vm_container(self, handle: VMHandle) -> None:
+    def _prepare_vm_from_source(
+        self,
+        *,
+        vm_id: str,
+        source_qcow2: Path,
+        image: ImageSpec,
+        vcpus: int,
+        memory_gb: int,
+        disk_gb: int,
+        published_ports: dict[int, int],
+        novnc_port: int,
+        snapshot_name: str,
+    ) -> VMHandle:
+        """Like _prepare_vm but copies from an arbitrary qcow2 (cache hit)."""
+        vm_root = self.slots_root / vm_id
+        storage_dir = vm_root / "storage"
+        logs_dir = vm_root / "logs"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        disk = storage_dir / "data.qcow2"
+        if disk.exists():
+            disk.unlink()
+        self._run(["cp", "--reflink=auto", str(source_qcow2), str(disk)])
+        container_name = f"cua-house-env-{vm_id}"
+        return VMHandle(
+            vm_id=vm_id,
+            snapshot_name=snapshot_name,
+            vcpus=vcpus,
+            memory_gb=memory_gb,
+            disk_gb=disk_gb,
+            published_ports=published_ports,
+            novnc_port=novnc_port,
+            storage_dir=storage_dir,
+            logs_dir=logs_dir,
+            disk_path=disk,
+            container_name=container_name,
+        )
+
+    async def _start_vm_container(
+        self, handle: VMHandle, *, use_loadvm: bool = True,
+    ) -> None:
         """Launch Docker container for a VM.
 
         Container persists across tasks -- only created once during pool init.
+        When ``use_loadvm`` is False (cache-miss cold boot), the container
+        starts without ``LOADVM_SNAPSHOT`` and QEMU performs a full cold boot
+        instead of resuming from a snapshot.
         """
         self._run(["docker", "rm", "-f", handle.container_name], check=False)
         handle.boot_started_at = datetime.now(UTC)
         handle.start_monotonic = time.perf_counter()
 
-        # Generate patched boot.sh for qcow2 pflash support
         patched_boot = self._ensure_patched_boot_sh()
 
         cmd = [
@@ -455,34 +500,23 @@ class DockerQemuRuntime:
             "--name", handle.container_name,
             "--device=/dev/kvm",
             "--cap-add", "NET_ADMIN",
-            # storage_dir contains vm.qcow2 (pre-baked, no separate golden needed)
             "-v", f"{handle.storage_dir}:/storage",
-            # Mount task-data under /shared/agenthle so VM sees E:\agenthle\...
-            # (rw needed for NTFS ACL staging via icacls in _apply_runtime_acls)
             "-v", f"{self.config.task_data_root}:/shared/agenthle:rw",
-            # Patched boot.sh: converts pflash vars to qcow2 + loadvm support
             "-v", f"{patched_boot}:/run/boot.sh:ro",
-            # noVNC is a container-side service (always port 8006 inside the container)
             "-p", f"{self.config.vm_bind_address}:{handle.novnc_port}:8006",
         ]
-        # Published guest ports: bridge-mode iptables DNAT forwards container
-        # traffic → guest VM IP automatically, so docker -p is sufficient.
         for guest_port, host_port in handle.published_ports.items():
             cmd.extend(["-p", f"{self.config.vm_bind_address}:{host_port}:{guest_port}"])
         cmd.extend([
             "-e", f"RAM_SIZE={handle.memory_gb}G",
             "-e", f"CPU_CORES={handle.vcpus}",
-            # Snapshot-compatible CPU settings
-            "-e", "CPU_MODEL=host",  # removes migratable=no
-            "-e", "HV=N",  # removes hv_passthrough
-            # Fix guest IP: dockur derives VM IP from container IP, but loadvm
-            # restores the snapshot's IP. Force all containers to use 172.30.0.2
-            # so DHCP/ARP matches the snapshot state.
+            "-e", "CPU_MODEL=host",
+            "-e", "HV=N",
             "-e", "VM_NET_IP=172.30.0.2",
-            # Load the pre-baked snapshot on QEMU start (skips Windows cold boot)
-            "-e", f"LOADVM_SNAPSHOT={handle.snapshot_name}",
-            self.config.docker_image,
         ])
+        if use_loadvm:
+            cmd.extend(["-e", f"LOADVM_SNAPSHOT={handle.snapshot_name}"])
+        cmd.append(self.config.docker_image)
 
         log_path = handle.logs_dir / "docker.log"
         self.event_logger.emit(
@@ -679,20 +713,32 @@ class DockerQemuRuntime:
         disk_gb: int | None = None,
         snapshot_name: str | None = None,
     ) -> VMHandle:
-        """Hot-add a single VM outside of pool initialization.
+        """Hot-add a single VM with snapshot-cache acceleration.
 
-        Used by the worker-side cluster client in response to PoolOp.ADD_VM.
-        Allocates ports from the runtime's instance pools, copies the template,
-        starts the container, waits for CUA readiness, and tracks the resulting
-        handle in ``_hotplug_handles`` so ``remove_vm`` can find it later.
+        Cache hit (shape previously booted on this worker):
+          reflink cached qcow2 → slot, docker run with -loadvm, ~seconds.
+        Cache miss (first-time shape):
+          reflink base template → slot, docker run cold-boot (~4-5 min),
+          QMP savevm into slot qcow2, reflink slot → cache for next time.
 
-        The operation is serialized on ``_mutation_lock`` so concurrent
-        hot-plug ops can't race on disk or container state.
+        The cold-boot VM immediately serves tasks — the cache write happens
+        *after* CUA readiness so the first task doesn't wait for double I/O.
         """
         from uuid import uuid4
+        from cua_house_server.runtimes.snapshot_cache import CacheKey
 
         snapshot = snapshot_name or image.key
         resolved_disk_gb = disk_gb if disk_gb is not None else image.default_disk_gb
+        cache_key = CacheKey(
+            image_key=image.key,
+            image_version=image.version,
+            vcpus=vcpus,
+            memory_gb=memory_gb,
+            disk_gb=resolved_disk_gb,
+        )
+        cached_path = self._snapshot_cache.lookup(cache_key)
+        cache_hit = cached_path is not None
+
         async with self._mutation_lock:
             await self.pull_template(image.key, image)
             vm_id = str(uuid4())
@@ -701,21 +747,37 @@ class DockerQemuRuntime:
                 for guest_port in image.published_ports
             }
             novnc_port = self._novnc_port_pool.allocate()
-            handle = await asyncio.to_thread(
-                self._prepare_vm,
-                vm_id=vm_id,
-                image=image,
-                vcpus=vcpus,
-                memory_gb=memory_gb,
-                disk_gb=resolved_disk_gb,
-                published_ports=published_ports,
-                novnc_port=novnc_port,
-                snapshot_name=snapshot,
-            )
-            await self._start_vm_container(handle)
 
-        # Wait for readiness outside the lock so other hot-adds can start
-        # preparing in parallel. Failure path cleans up the allocated state.
+            if cache_hit:
+                handle = await asyncio.to_thread(
+                    self._prepare_vm_from_source,
+                    vm_id=vm_id,
+                    source_qcow2=cached_path,
+                    image=image,
+                    vcpus=vcpus,
+                    memory_gb=memory_gb,
+                    disk_gb=resolved_disk_gb,
+                    published_ports=published_ports,
+                    novnc_port=novnc_port,
+                    snapshot_name=snapshot,
+                )
+                handle.from_cache = True
+                await self._start_vm_container(handle, use_loadvm=True)
+            else:
+                handle = await asyncio.to_thread(
+                    self._prepare_vm,
+                    vm_id=vm_id,
+                    image=image,
+                    vcpus=vcpus,
+                    memory_gb=memory_gb,
+                    disk_gb=resolved_disk_gb,
+                    published_ports=published_ports,
+                    novnc_port=novnc_port,
+                    snapshot_name=snapshot,
+                )
+                handle.from_cache = False
+                await self._start_vm_container(handle, use_loadvm=False)
+
         try:
             await self.wait_ready(handle)
             handle.ready_at = datetime.now(UTC)
@@ -727,7 +789,19 @@ class DockerQemuRuntime:
             self._novnc_port_pool.release(novnc_port)
             raise
 
+        if not cache_hit:
+            try:
+                logger.info("cache miss for %s — savevm + cache write", cache_key.stem)
+                await handle.qmp.save_snapshot(
+                    handle.snapshot_name,
+                    timeout_s=self.config.snapshot_save_timeout_s,
+                )
+                self._snapshot_cache.write(cache_key, handle.disk_path)
+            except Exception:
+                logger.warning("savevm/cache-write failed; VM still usable", exc_info=True)
+
         self._hotplug_handles[vm_id] = handle
+        boot_s = time.perf_counter() - (handle.start_monotonic or time.perf_counter())
         self.event_logger.emit(
             "vm_hot_added",
             vm_id=vm_id,
@@ -735,6 +809,8 @@ class DockerQemuRuntime:
             vcpus=vcpus,
             memory_gb=memory_gb,
             disk_gb=resolved_disk_gb,
+            from_cache=cache_hit,
+            boot_s=round(boot_s, 1),
         )
         return handle
 

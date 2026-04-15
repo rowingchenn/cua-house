@@ -214,6 +214,7 @@ class HostRuntimeConfig:
     # 0.0.0.0 so clients in the VPC can reach VM services directly on the
     # worker's public IP.
     vm_bind_address: str = "127.0.0.1"
+    snapshot_cache_dir: Path | None = None
 
 
 @dataclass(slots=True)
@@ -285,6 +286,7 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         mode=str(raw.get("mode", "standalone")),
         cluster=_load_cluster_config(raw.get("cluster")),
         vm_bind_address=str(raw.get("vm_bind_address", "127.0.0.1")),
+        snapshot_cache_dir=Path(raw["snapshot_cache_dir"]) if raw.get("snapshot_cache_dir") else None,
     )
 
 
