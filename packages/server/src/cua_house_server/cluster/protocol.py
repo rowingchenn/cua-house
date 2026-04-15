@@ -47,6 +47,8 @@ class WorkerVMSummary(BaseModel):
     memory_gb: int
     disk_gb: int
     state: str  # mirrors VMState enum values
+    warming: bool = False
+    from_cache: bool = False
     lease_id: str | None = None
     # Public reach info — used by master to construct TaskAssignment.urls so
     # clients can talk to the VM directly (Phase 4 ships without double-hop).

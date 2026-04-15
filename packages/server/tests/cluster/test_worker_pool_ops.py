@@ -29,6 +29,7 @@ class _FakeHandle:
     disk_gb: int = 64
     published_ports: dict[int, int] = field(default_factory=dict)
     novnc_port: int = 0
+    from_cache: bool = False
 
 
 @dataclass

@@ -95,11 +95,15 @@ def build_cluster_api_router(
     async def cluster_status() -> dict[str, Any]:
         sessions = await registry.snapshot()
         online = sum(1 for s in sessions if s.online)
-        total_vms = sum(len(s.vm_summaries) for s in sessions)
+        all_vms = [vm for s in sessions for vm in s.vm_summaries]
         return {
             "workers_total": len(sessions),
             "workers_online": online,
-            "vm_instances": total_vms,
+            "vm_instances": len(all_vms),
+            "vm_ready": sum(1 for vm in all_vms if vm.state == "ready"),
+            "vm_leased": sum(1 for vm in all_vms if vm.state == "leased"),
+            "vm_warming": sum(1 for vm in all_vms if vm.warming),
+            "vm_from_cache": sum(1 for vm in all_vms if vm.from_cache),
             "pool_assignments": len(pool_spec.assignments),
         }
 

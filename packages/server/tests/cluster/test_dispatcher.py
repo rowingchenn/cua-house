@@ -268,3 +268,89 @@ async def test_cancel_batch_sends_release_lease_to_worker() -> None:
     await dispatcher.cancel_batch(batch.batch_id, reason="user cancel")
     assert len(worker.released) == 1
     assert worker.released[0].final_status == "abandoned"
+
+
+@pytest.mark.asyncio
+async def test_smallest_fit_vm_selected_for_shape() -> None:
+    """When multiple VMs satisfy a request, dispatcher picks the smallest."""
+    coordinator = PoolOpCoordinator()
+    registry = WorkerRegistry(heartbeat_ttl_s=999)
+    worker = _ScriptedWorker(coordinator)
+    await registry.register(
+        worker_id="w1",
+        runtime_version="0.1",
+        capacity=WorkerCapacity(total_vcpus=32, total_memory_gb=128, total_disk_gb=1000),
+        hosted_images=["cpu-free"],
+        ws=worker,  # type: ignore[arg-type]
+    )
+    await registry.apply_heartbeat(
+        "w1",
+        load_cpu=0.0,
+        load_memory=0.0,
+        vm_summaries=[
+            WorkerVMSummary(
+                vm_id="vm-big", image_key="cpu-free",
+                vcpus=8, memory_gb=16, disk_gb=128, state="ready",
+            ),
+            WorkerVMSummary(
+                vm_id="vm-small", image_key="cpu-free",
+                vcpus=4, memory_gb=8, disk_gb=64, state="ready",
+            ),
+        ],
+    )
+    dispatcher = ClusterDispatcher(
+        host_config=_host_config(), images=_images(),
+        registry=registry, coordinator=coordinator,
+    )
+    await dispatcher.submit_batch(
+        BatchCreateRequest(tasks=[
+            TaskRequirement(
+                task_id="t1", task_path="/tmp/t1",
+                snapshot_name="cpu-free", vcpus=4, memory_gb=8, disk_gb=64,
+            ),
+        ])
+    )
+    await dispatcher._dispatch_pending()
+    assert len(worker.assigned) == 1
+    assert worker.assigned[0].vm_id == "vm-small"
+
+
+@pytest.mark.asyncio
+async def test_task_stays_queued_when_disk_gb_too_small() -> None:
+    """Task requesting more disk than any available VM stays QUEUED."""
+    coordinator = PoolOpCoordinator()
+    registry = WorkerRegistry(heartbeat_ttl_s=999)
+    worker = _ScriptedWorker(coordinator)
+    await registry.register(
+        worker_id="w1",
+        runtime_version="0.1",
+        capacity=WorkerCapacity(total_vcpus=16, total_memory_gb=64, total_disk_gb=500),
+        hosted_images=["cpu-free"],
+        ws=worker,  # type: ignore[arg-type]
+    )
+    await registry.apply_heartbeat(
+        "w1",
+        load_cpu=0.0,
+        load_memory=0.0,
+        vm_summaries=[
+            WorkerVMSummary(
+                vm_id="vm-1", image_key="cpu-free",
+                vcpus=4, memory_gb=8, disk_gb=64, state="ready",
+            ),
+        ],
+    )
+    dispatcher = ClusterDispatcher(
+        host_config=_host_config(), images=_images(),
+        registry=registry, coordinator=coordinator,
+    )
+    await dispatcher.submit_batch(
+        BatchCreateRequest(tasks=[
+            TaskRequirement(
+                task_id="t1", task_path="/tmp/t1",
+                snapshot_name="cpu-free", vcpus=4, memory_gb=8, disk_gb=256,
+            ),
+        ])
+    )
+    await dispatcher._dispatch_pending()
+    task = await dispatcher.get_task("t1")
+    assert task.state == TaskState.QUEUED

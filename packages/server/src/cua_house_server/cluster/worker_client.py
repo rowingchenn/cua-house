@@ -361,6 +361,7 @@ class WorkerClusterClient:
                     memory_gb=handle.memory_gb,
                     disk_gb=handle.disk_gb,
                     state="ready",
+                    from_cache=handle.from_cache,
                     public_host=self.public_host,
                     published_ports=dict(handle.published_ports),
                     novnc_port=handle.novnc_port,
