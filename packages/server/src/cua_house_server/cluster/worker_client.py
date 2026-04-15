@@ -352,6 +352,7 @@ class WorkerClusterClient:
                 self._vm_summaries[handle.vm_id] = WorkerVMSummary(
                     vm_id=handle.vm_id,
                     image_key=args.image_key,
+                    image_version=image.version,
                     vcpus=handle.vcpus,
                     memory_gb=handle.memory_gb,
                     disk_gb=handle.disk_gb,

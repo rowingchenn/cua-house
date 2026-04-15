@@ -119,6 +119,7 @@ class DiffEntry:
     worker_id: str
     op: str  # ADD_IMAGE | REMOVE_IMAGE | ADD_VM | REMOVE_VM
     image_key: str | None = None
+    image_version: str | None = None
     vm_id: str | None = None
     vcpus: int | None = None
     memory_gb: int | None = None
@@ -221,6 +222,7 @@ def diff_to_envelope(entry: DiffEntry) -> Envelope:
         op=entry.op,  # type: ignore[arg-type]
         args=PoolOpArgs(
             image_key=entry.image_key,
+            image_version=entry.image_version,
             vm_id=entry.vm_id,
             vcpus=entry.vcpus,
             memory_gb=entry.memory_gb,

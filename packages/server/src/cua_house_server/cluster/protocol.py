@@ -42,6 +42,7 @@ class WorkerVMSummary(BaseModel):
 
     vm_id: str
     image_key: str
+    image_version: str = "unversioned"
     vcpus: int
     memory_gb: int
     disk_gb: int
@@ -63,6 +64,7 @@ class PoolOpArgs(BaseModel):
     """
 
     image_key: str | None = None
+    image_version: str | None = None  # None means "whatever worker has"
     image_spec: dict[str, Any] | None = None  # serialized ImageSpec
     vm_id: str | None = None
     vcpus: int | None = None
@@ -180,6 +182,7 @@ class AssignTask(BaseModel):
     lease_id: str
     vm_id: str
     image_key: str
+    image_version: str | None = None
     task_path: str | None = None
     vcpus: int | None = None
     memory_gb: int | None = None

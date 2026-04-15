@@ -6,6 +6,7 @@ images:
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
+      version: "20260413"  # bump when re-baking; invalidates worker snapshot cache
       default_vcpus: 4
       default_memory_gb: 8
     gcp:
@@ -24,6 +25,7 @@ images:
     published_ports: [5000]
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-license/cpu-license-20260405.qcow2
+      version: "20260405"
       default_vcpus: 4
       default_memory_gb: 16
     gcp:
@@ -61,6 +63,7 @@ images:
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
+      version: "20260408"
       default_vcpus: 4
       default_memory_gb: 8
     gcp:
@@ -80,6 +83,7 @@ images:
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/waa/waa-20260408.qcow2
       gcs_uri: gs://agenthle-images/templates/waa/waa-20260408.qcow2
+      version: "20260408"
       default_vcpus: 4
       default_memory_gb: 8
 

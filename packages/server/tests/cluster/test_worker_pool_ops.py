@@ -97,6 +97,7 @@ def _make_client(runtime: _FakeRuntime) -> WorkerClusterClient:
 class _StubImage:
     key = "cpu-free"
     default_disk_gb = 64
+    version = "test-v1"
 
 
 @pytest.mark.asyncio

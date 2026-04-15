@@ -213,6 +213,7 @@ class PoolReconciler:
             op=entry.op,  # type: ignore[arg-type]
             args=PoolOpArgs(
                 image_key=entry.image_key,
+                image_version=entry.image_version,
                 vm_id=entry.vm_id,
                 vcpus=entry.vcpus,
                 memory_gb=entry.memory_gb,
@@ -255,6 +256,7 @@ class PoolReconciler:
                 WorkerVMSummary(
                     vm_id=result.produced_vm_id,
                     image_key=entry.image_key,
+                    image_version=entry.image_version or "unversioned",
                     vcpus=entry.vcpus or 0,
                     memory_gb=entry.memory_gb or 0,
                     disk_gb=entry.disk_gb or 0,

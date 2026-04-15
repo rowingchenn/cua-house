@@ -30,6 +30,7 @@ class LocalImageConfig:
 
     template_qcow2_path: Path
     gcs_uri: str | None = None
+    version: str = "unversioned"
     default_vcpus: int = 4
     default_memory_gb: int = 8
     default_disk_gb: int = 64
@@ -100,6 +101,18 @@ class ImageSpec:
         if self.local:
             return self.local.default_disk_gb
         return self.gcp.boot_disk_gb if self.gcp else 64
+
+    @property
+    def version(self) -> str:
+        """Image content version string. Bumps invalidate the snapshot cache.
+
+        Operators set this in the catalog alongside the qcow2 path — typical
+        convention is the bake date (e.g. ``"20260414"``). ``"unversioned"``
+        means the cache never evicts on content bumps; use for dev only.
+        """
+        if self.local:
+            return self.local.version
+        return "unversioned"
 
     @property
     def template_qcow2_path(self) -> Path | None:
@@ -331,6 +344,7 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
             local_cfg = LocalImageConfig(
                 template_qcow2_path=Path(local_raw.get("template_qcow2_path") or ""),
                 gcs_uri=local_raw.get("gcs_uri"),
+                version=str(local_raw.get("version", "unversioned")),
                 default_vcpus=int(local_raw.get("default_vcpus", 4)),
                 default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
                 default_disk_gb=int(local_raw.get("default_disk_gb", 64)),

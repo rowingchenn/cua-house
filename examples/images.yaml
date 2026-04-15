@@ -21,6 +21,11 @@ images:
     local:
       template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
       gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
+      # Bump when re-baking the qcow2 — the worker's snapshot cache keys
+      # off (image, version, vcpus, memory_gb, disk_gb), so a new version
+      # forces a fresh cold boot + savevm the next time a VM of this shape
+      # is added. Convention: bake date (YYYYMMDD).
+      version: "20260413"
       default_vcpus: 4
       default_memory_gb: 8
     gcp:
