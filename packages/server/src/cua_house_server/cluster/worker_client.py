@@ -333,10 +333,12 @@ class WorkerClusterClient:
                 image = self._catalog_lookup(args.image_key)
                 if image is None:
                     return False, f"unknown image {args.image_key}", None
+                disk_gb = args.disk_gb if args.disk_gb is not None else image.default_disk_gb
                 handle = await self.runtime.add_vm(
                     image=image,
                     vcpus=args.vcpus,
                     memory_gb=args.memory_gb,
+                    disk_gb=disk_gb,
                 )
                 # Make the hot-plug VM visible to the local EnvScheduler so
                 # client HTTP lease ops (heartbeat/stage/complete) can find
@@ -352,6 +354,7 @@ class WorkerClusterClient:
                     image_key=args.image_key,
                     vcpus=handle.vcpus,
                     memory_gb=handle.memory_gb,
+                    disk_gb=handle.disk_gb,
                     state="ready",
                     public_host=self.public_host,
                     published_ports=dict(handle.published_ports),
@@ -399,6 +402,7 @@ class WorkerClusterClient:
                 snapshot_name=msg.image_key,
                 vcpus=msg.vcpus or 0,
                 memory_gb=msg.memory_gb or 0,
+                disk_gb=msg.disk_gb or 0,
                 task_data=task_data,
                 metadata=dict(msg.metadata),
                 vm_id=msg.vm_id,

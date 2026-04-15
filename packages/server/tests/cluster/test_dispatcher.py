@@ -131,6 +131,7 @@ async def _setup_dispatcher_with_worker(vm_available: bool = True):
                     image_key="cpu-free",
                     vcpus=4,
                     memory_gb=8,
+                    disk_gb=64,
                     state="ready",
                 )
             ],

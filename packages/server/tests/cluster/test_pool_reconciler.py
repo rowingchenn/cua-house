@@ -27,7 +27,7 @@ def test_add_image_then_add_vm_when_worker_empty() -> None:
 def test_no_ops_when_actual_matches_desired() -> None:
     spec = _make_spec(PoolAssignment("w1", "cpu-free", 1, 4, 8))
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
     diff = compute_diff(
         spec=spec, worker_id="w1", worker_images={"cpu-free"}, worker_vms=vms,
@@ -38,8 +38,8 @@ def test_no_ops_when_actual_matches_desired() -> None:
 def test_remove_extra_vms_above_desired_count() -> None:
     spec = _make_spec(PoolAssignment("w1", "cpu-free", 1, 4, 8))
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
-        WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
+        WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
     diff = compute_diff(
         spec=spec, worker_id="w1", worker_images={"cpu-free"}, worker_vms=vms,
@@ -52,7 +52,7 @@ def test_remove_extra_vms_above_desired_count() -> None:
 def test_remove_image_when_no_longer_desired() -> None:
     spec = _make_spec()
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
     diff = compute_diff(
         spec=spec, worker_id="w1", worker_images={"cpu-free"}, worker_vms=vms,
@@ -69,7 +69,7 @@ def test_size_bucket_isolation() -> None:
         PoolAssignment("w1", "cpu-free", 1, 8, 16),
     )
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=2, memory_gb=4, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=2, memory_gb=4, disk_gb=64, state="ready"),
     ]
     diff = compute_diff(
         spec=spec, worker_id="w1", worker_images={"cpu-free"}, worker_vms=vms,

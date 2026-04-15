@@ -50,7 +50,7 @@ def test_heartbeat_roundtrip_with_vms() -> None:
         load_memory=0.5,
         vm_summaries=[
             WorkerVMSummary(
-                vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"
+                vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"
             )
         ],
     )

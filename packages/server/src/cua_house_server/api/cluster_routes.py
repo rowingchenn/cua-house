@@ -25,6 +25,7 @@ class PoolAssignmentModel(BaseModel):
     count: int
     vcpus: int
     memory_gb: int
+    disk_gb: int = 64
 
 
 class PoolSpecModel(BaseModel):
@@ -67,6 +68,7 @@ def build_cluster_api_router(
                     count=a.count,
                     vcpus=a.vcpus,
                     memory_gb=a.memory_gb,
+                    disk_gb=a.disk_gb,
                 )
                 for a in pool_spec.assignments
             ]
@@ -82,6 +84,7 @@ def build_cluster_api_router(
                     count=a.count,
                     vcpus=a.vcpus,
                     memory_gb=a.memory_gb,
+                    disk_gb=a.disk_gb,
                 )
                 for a in spec.assignments
             ]

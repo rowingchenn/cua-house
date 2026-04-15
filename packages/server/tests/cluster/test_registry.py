@@ -54,7 +54,7 @@ async def test_heartbeat_updates_vm_summaries() -> None:
         ws=ws,  # type: ignore[arg-type]
     )
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
     await reg.apply_heartbeat("w1", load_cpu=0.2, load_memory=0.3, vm_summaries=vms)
     session = await reg.get("w1")
@@ -92,12 +92,12 @@ async def test_free_vm_for_matches_only_ready() -> None:
     await reg.apply_heartbeat(
         "w1", load_cpu=0.0, load_memory=0.0,
         vm_summaries=[
-            WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="leased"),
-            WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=8, memory_gb=16, state="ready"),
+            WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="leased"),
+            WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=8, memory_gb=16, disk_gb=64, state="ready"),
         ],
     )
     session = await reg.get("w1")
     assert session is not None
-    assert session.free_vm_for("cpu-free", 4, 8) is not None
-    assert session.free_vm_for("cpu-free", 4, 8).vm_id == "v2"
-    assert session.free_vm_for("cpu-free", 16, 32) is None
+    assert session.free_vm_for("cpu-free", 4, 8, 64) is not None
+    assert session.free_vm_for("cpu-free", 4, 8, 64).vm_id == "v2"
+    assert session.free_vm_for("cpu-free", 16, 32, 64) is None

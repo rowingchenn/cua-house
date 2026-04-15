@@ -44,6 +44,7 @@ class WorkerVMSummary(BaseModel):
     image_key: str
     vcpus: int
     memory_gb: int
+    disk_gb: int
     state: str  # mirrors VMState enum values
     lease_id: str | None = None
     # Public reach info — used by master to construct TaskAssignment.urls so
@@ -66,6 +67,7 @@ class PoolOpArgs(BaseModel):
     vm_id: str | None = None
     vcpus: int | None = None
     memory_gb: int | None = None
+    disk_gb: int | None = None
     count: int | None = None
 
 
@@ -181,6 +183,7 @@ class AssignTask(BaseModel):
     task_path: str | None = None
     vcpus: int | None = None
     memory_gb: int | None = None
+    disk_gb: int | None = None
     task_data: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

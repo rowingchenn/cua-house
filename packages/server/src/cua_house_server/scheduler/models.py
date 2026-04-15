@@ -31,6 +31,7 @@ class VMRecord(BaseModel):
     state: VMState
     vcpus: int
     memory_gb: int
+    disk_gb: int = 64
     container_name: str
     published_ports: dict[int, int] = Field(default_factory=dict)
     novnc_port: int = 0

@@ -216,6 +216,7 @@ class PoolReconciler:
                 vm_id=entry.vm_id,
                 vcpus=entry.vcpus,
                 memory_gb=entry.memory_gb,
+                disk_gb=entry.disk_gb,
             ),
         )
         envelope = Envelope(
@@ -256,6 +257,7 @@ class PoolReconciler:
                     image_key=entry.image_key,
                     vcpus=entry.vcpus or 0,
                     memory_gb=entry.memory_gb or 0,
+                    disk_gb=entry.disk_gb or 0,
                     state="ready",
                 )
             )

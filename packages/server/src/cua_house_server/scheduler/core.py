@@ -101,6 +101,7 @@ class EnvScheduler:
                     state=VMState.READY,
                     vcpus=handle.vcpus,
                     memory_gb=handle.memory_gb,
+                    disk_gb=handle.disk_gb,
                     container_name=handle.container_name,
                     published_ports=handle.published_ports,
                     novnc_port=handle.novnc_port,
@@ -131,10 +132,11 @@ class EnvScheduler:
             for req in request.tasks:
                 if req.task_id in self._tasks:
                     raise ValueError(f"task_id already exists: {req.task_id}")
-                vcpus, memory_gb = self._resolve_resources(
+                vcpus, memory_gb, disk_gb = self._resolve_resources(
                     req.snapshot_name,
                     vcpus=req.vcpus,
                     memory_gb=req.memory_gb,
+                    disk_gb=req.disk_gb,
                 )
                 task = TaskStatus(
                     task_id=req.task_id,
@@ -142,6 +144,7 @@ class EnvScheduler:
                     snapshot_name=req.snapshot_name,
                     vcpus=vcpus,
                     memory_gb=memory_gb,
+                    disk_gb=disk_gb,
                     metadata=req.metadata,
                     task_data=req.task_data,
                     state=TaskState.QUEUED,
@@ -804,30 +807,36 @@ class EnvScheduler:
         *,
         vcpus: int | None = None,
         memory_gb: int | None = None,
-    ) -> tuple[int, int]:
-        """Resolve vcpus and memory_gb for a task.
+        disk_gb: int | None = None,
+    ) -> tuple[int, int, int]:
+        """Resolve the full shape tuple for a task.
 
-        Client-supplied values take precedence. When either is missing, fall
-        back to the image defaults (local or GCP) or legacy vm_pool entries.
+        Client-supplied values take precedence. When any field is missing,
+        fall back to the image defaults (local or GCP) or legacy vm_pool
+        entries.
         """
         image = self.images.get(snapshot_name)
         if image is not None:
             default_cpu = image.default_vcpus
             default_mem = image.default_memory_gb
+            default_disk = image.default_disk_gb
         else:
             default_cpu = None
             default_mem = None
+            default_disk = 64
             for entry in self.host_config.vm_pool:
                 if entry.snapshot_name == snapshot_name:
                     default_cpu = entry.vcpus
                     default_mem = entry.memory_gb
+                    default_disk = entry.disk_gb
                     break
             if default_cpu is None:
                 raise ValueError(f"unknown snapshot_name: {snapshot_name}")
 
         resolved_cpu = vcpus if vcpus is not None else default_cpu
         resolved_mem = memory_gb if memory_gb is not None else default_mem
-        return resolved_cpu, resolved_mem
+        resolved_disk = disk_gb if disk_gb is not None else default_disk
+        return resolved_cpu, resolved_mem, resolved_disk
 
     def _resolve_pool_entry(self, snapshot_name: str) -> "VMPoolEntry":
         from cua_house_common.models import VMPoolEntry
@@ -936,6 +945,7 @@ class EnvScheduler:
             state=VMState.READY,
             vcpus=vcpus,
             memory_gb=memory_gb,
+            disk_gb=handle.disk_gb,
             container_name=handle.container_name,
             published_ports=handle.published_ports,
             novnc_port=handle.novnc_port,
@@ -967,6 +977,7 @@ class EnvScheduler:
         snapshot_name: str,
         vcpus: int,
         memory_gb: int,
+        disk_gb: int,
         task_data: "TaskRequirement.TaskDataRequest | None",
         metadata: dict[str, Any],
         vm_id: str,
@@ -994,6 +1005,7 @@ class EnvScheduler:
                 snapshot_name=snapshot_name,
                 vcpus=vcpus,
                 memory_gb=memory_gb,
+                disk_gb=disk_gb,
                 metadata=metadata,
                 task_data=task_data,
                 state=TaskState.READY,

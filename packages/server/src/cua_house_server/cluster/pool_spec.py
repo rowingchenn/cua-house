@@ -37,6 +37,7 @@ class PoolAssignment:
     count: int
     vcpus: int
     memory_gb: int
+    disk_gb: int = 64
 
 
 @dataclass
@@ -91,6 +92,7 @@ class ClusterPoolSpec:
                     count=int(item["count"]),
                     vcpus=int(item["vcpus"]),
                     memory_gb=int(item["memory_gb"]),
+                    disk_gb=int(item.get("disk_gb", 64)),
                 ))
             except (KeyError, TypeError, ValueError) as exc:
                 logger.warning("skipping malformed pool assignment %r: %s", item, exc)
@@ -120,6 +122,7 @@ class DiffEntry:
     vm_id: str | None = None
     vcpus: int | None = None
     memory_gb: int | None = None
+    disk_gb: int | None = None
 
 
 def compute_diff(
@@ -152,15 +155,15 @@ def compute_diff(
 
     # For each desired image, resize the pool (ADD_VM / REMOVE_VM).
     for image_key, assignments in desired_by_image.items():
-        # Assignments may be split across multiple sizes on the same image;
-        # treat each (cpu, mem) as its own bucket.
-        desired_buckets: dict[tuple[int, int], int] = {}
+        # Assignments may be split across multiple shapes on the same image;
+        # treat each (vcpus, memory_gb, disk_gb) as its own bucket.
+        desired_buckets: dict[tuple[int, int, int], int] = {}
         for a in assignments:
-            key = (a.vcpus, a.memory_gb)
+            key = (a.vcpus, a.memory_gb, a.disk_gb)
             desired_buckets[key] = desired_buckets.get(key, 0) + a.count
-        actual_buckets: dict[tuple[int, int], list[WorkerVMSummary]] = {}
+        actual_buckets: dict[tuple[int, int, int], list[WorkerVMSummary]] = {}
         for vm in actual_by_image.get(image_key, []):
-            key = (vm.vcpus, vm.memory_gb)
+            key = (vm.vcpus, vm.memory_gb, vm.disk_gb)
             actual_buckets.setdefault(key, []).append(vm)
 
         for key, want in desired_buckets.items():
@@ -173,6 +176,7 @@ def compute_diff(
                         image_key=image_key,
                         vcpus=key[0],
                         memory_gb=key[1],
+                        disk_gb=key[2],
                     )
                 )
         for key, vms in actual_buckets.items():
@@ -220,6 +224,7 @@ def diff_to_envelope(entry: DiffEntry) -> Envelope:
             vm_id=entry.vm_id,
             vcpus=entry.vcpus,
             memory_gb=entry.memory_gb,
+            disk_gb=entry.disk_gb,
         ),
     )
     return Envelope(msg_id=op.op_id, payload=op.model_dump())

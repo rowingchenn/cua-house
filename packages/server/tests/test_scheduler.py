@@ -569,6 +569,7 @@ def test_runtime_prepare_slot_uses_container_visible_backing_file(tmp_path: Path
         ),
         vcpus=4,
         memory_gb=16,
+        disk_gb=64,
         published_ports={5000: 16000},
         novnc_port=18000,
         snapshot_name="cpu-free",

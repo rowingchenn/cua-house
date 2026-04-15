@@ -114,8 +114,8 @@ async def test_reconciler_shrinks_oversized_pool() -> None:
     session = await registry.get("w1")
     assert session is not None
     session.vm_summaries = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
-        WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=4, memory_gb=8, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
+        WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
     spec = ClusterPoolSpec()
     spec.set([PoolAssignment("w1", "cpu-free", 1, 4, 8)])

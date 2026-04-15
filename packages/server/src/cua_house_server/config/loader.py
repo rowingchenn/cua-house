@@ -32,6 +32,7 @@ class LocalImageConfig:
     gcs_uri: str | None = None
     default_vcpus: int = 4
     default_memory_gb: int = 8
+    default_disk_gb: int = 64
 
 
 @dataclass(slots=True)
@@ -93,6 +94,12 @@ class ImageSpec:
         if self.local:
             return self.local.default_memory_gb
         return 16
+
+    @property
+    def default_disk_gb(self) -> int:
+        if self.local:
+            return self.local.default_disk_gb
+        return self.gcp.boot_disk_gb if self.gcp else 64
 
     @property
     def template_qcow2_path(self) -> Path | None:
@@ -326,6 +333,7 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
                 gcs_uri=local_raw.get("gcs_uri"),
                 default_vcpus=int(local_raw.get("default_vcpus", 4)),
                 default_memory_gb=int(local_raw.get("default_memory_gb", 8)),
+                default_disk_gb=int(local_raw.get("default_disk_gb", 64)),
             )
         if "gcp" in spec:
             gcp_raw = spec["gcp"]

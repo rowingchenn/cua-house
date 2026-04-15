@@ -58,6 +58,7 @@ class TaskRequirement(BaseModel):
     snapshot_name: str
     vcpus: int | None = None
     memory_gb: int | None = None
+    disk_gb: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskDataRequest | None = None
     # NOTE: os_type is intentionally NOT a client field. It is an image-static
@@ -130,6 +131,7 @@ class TaskStatus(BaseModel):
     snapshot_name: str
     vcpus: int
     memory_gb: int
+    disk_gb: int
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskRequirement.TaskDataRequest | None = None
     state: TaskState
@@ -181,3 +183,4 @@ class VMPoolEntry(BaseModel):
     count: int = 1
     vcpus: int = 4
     memory_gb: int = 8
+    disk_gb: int = 64

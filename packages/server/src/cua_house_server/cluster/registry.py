@@ -51,16 +51,27 @@ class WorkerSession:
     load_memory: float = 0.0
     online: bool = True
 
-    def free_vm_for(self, image_key: str, vcpus: int, memory_gb: int) -> WorkerVMSummary | None:
-        """Return a READY VM matching the request, if any."""
+    def free_vm_for(
+        self, image_key: str, vcpus: int, memory_gb: int, disk_gb: int,
+    ) -> WorkerVMSummary | None:
+        """Return a READY VM matching the shape request, if any.
+
+        Smallest-fit: prefer the tightest VM that still satisfies the request
+        so a batch of small tasks doesn't squat on oversized VMs.
+        """
+        best: WorkerVMSummary | None = None
         for vm in self.vm_summaries:
             if vm.state != "ready":
                 continue
             if vm.image_key != image_key:
                 continue
-            if vm.vcpus >= vcpus and vm.memory_gb >= memory_gb:
-                return vm
-        return None
+            if vm.vcpus < vcpus or vm.memory_gb < memory_gb or vm.disk_gb < disk_gb:
+                continue
+            if best is None or (
+                vm.vcpus, vm.memory_gb, vm.disk_gb
+            ) < (best.vcpus, best.memory_gb, best.disk_gb):
+                best = vm
+        return best
 
 
 class WorkerRegistry:

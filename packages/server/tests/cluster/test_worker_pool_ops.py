@@ -26,6 +26,7 @@ class _FakeHandle:
     vm_id: str
     vcpus: int
     memory_gb: int
+    disk_gb: int = 64
     published_ports: dict[int, int] = field(default_factory=dict)
     novnc_port: int = 0
 
@@ -33,7 +34,7 @@ class _FakeHandle:
 @dataclass
 class _FakeRuntime:
     pulled: list[str] = field(default_factory=list)
-    added: list[tuple[str, int, int]] = field(default_factory=list)
+    added: list[tuple[str, int, int, int]] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     _counter: int = 0
     _cluster_catalog: dict[str, Any] = field(default_factory=dict)
@@ -42,11 +43,13 @@ class _FakeRuntime:
         self.pulled.append(image_key)
 
     async def add_vm(self, *, image: Any, vcpus: int, memory_gb: int,
+                     disk_gb: int | None = None,
                      snapshot_name: str | None = None) -> _FakeHandle:
         self._counter += 1
         vm_id = f"vm-{self._counter}"
-        self.added.append((image.key, vcpus, memory_gb))
-        return _FakeHandle(vm_id=vm_id, vcpus=vcpus, memory_gb=memory_gb)
+        resolved_disk = disk_gb if disk_gb is not None else image.default_disk_gb
+        self.added.append((image.key, vcpus, memory_gb, resolved_disk))
+        return _FakeHandle(vm_id=vm_id, vcpus=vcpus, memory_gb=memory_gb, disk_gb=resolved_disk)
 
     async def remove_vm(self, vm_id: str) -> None:
         self.removed.append(vm_id)
@@ -93,6 +96,7 @@ def _make_client(runtime: _FakeRuntime) -> WorkerClusterClient:
 
 class _StubImage:
     key = "cpu-free"
+    default_disk_gb = 64
 
 
 @pytest.mark.asyncio
@@ -119,7 +123,7 @@ async def test_add_vm_calls_runtime_and_tracks_summary() -> None:
     ok, err, produced = await client._execute_pool_op(op)
     assert ok is True
     assert produced is not None
-    assert runtime.added == [("cpu-free", 4, 8)]
+    assert runtime.added == [("cpu-free", 4, 8, 64)]
     assert produced in client._vm_summaries
     assert client._vm_summaries[produced].image_key == "cpu-free"
 

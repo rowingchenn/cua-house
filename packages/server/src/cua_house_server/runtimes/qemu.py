@@ -30,6 +30,7 @@ class VMHandle:
     snapshot_name: str
     vcpus: int
     memory_gb: int
+    disk_gb: int
     # guest_port → host_loopback_port for every port in the image's published_ports.
     published_ports: dict[int, int]
     novnc_port: int
@@ -285,6 +286,7 @@ class DockerQemuRuntime:
                     image=image,
                     vcpus=entry.vcpus,
                     memory_gb=entry.memory_gb,
+                    disk_gb=entry.disk_gb,
                     published_ports=published_ports,
                     novnc_port=novnc_port,
                     snapshot_name=entry.snapshot_name,
@@ -384,6 +386,7 @@ class DockerQemuRuntime:
         image: ImageSpec,
         vcpus: int,
         memory_gb: int,
+        disk_gb: int,
         published_ports: dict[int, int],
         novnc_port: int,
         snapshot_name: str,
@@ -407,12 +410,26 @@ class DockerQemuRuntime:
             disk.unlink()
         self._run(["cp", "--reflink=auto", str(template), str(disk)])
 
+        # If the requested disk_gb is larger than the template's virtual size,
+        # grow the slot qcow2. Never shrink — loadvm guarantees the guest sees
+        # at least the shape we booted with. qemu-img resize is cheap on qcow2.
+        try:
+            info = self._run(["qemu-img", "info", "--output=json", str(disk)])
+            import json as _json
+            virtual_bytes = int(_json.loads(info.stdout or "{}").get("virtual-size", 0))
+            want_bytes = int(disk_gb) * 1024 ** 3
+            if want_bytes > virtual_bytes > 0:
+                self._run(["qemu-img", "resize", str(disk), f"{disk_gb}G"])
+        except Exception as exc:
+            logger.warning("qemu-img resize skipped for %s: %s", disk, exc)
+
         container_name = f"cua-house-env-{vm_id}"
         return VMHandle(
             vm_id=vm_id,
             snapshot_name=snapshot_name,
             vcpus=vcpus,
             memory_gb=memory_gb,
+            disk_gb=disk_gb,
             published_ports=published_ports,
             novnc_port=novnc_port,
             storage_dir=storage_dir,
@@ -634,6 +651,7 @@ class DockerQemuRuntime:
             image=image,
             vcpus=handle.vcpus,
             memory_gb=handle.memory_gb,
+            disk_gb=handle.disk_gb,
             published_ports=handle.published_ports,
             novnc_port=handle.novnc_port,
             snapshot_name=handle.snapshot_name,
@@ -658,6 +676,7 @@ class DockerQemuRuntime:
         image: ImageSpec,
         vcpus: int,
         memory_gb: int,
+        disk_gb: int | None = None,
         snapshot_name: str | None = None,
     ) -> VMHandle:
         """Hot-add a single VM outside of pool initialization.
@@ -673,6 +692,7 @@ class DockerQemuRuntime:
         from uuid import uuid4
 
         snapshot = snapshot_name or image.key
+        resolved_disk_gb = disk_gb if disk_gb is not None else image.default_disk_gb
         async with self._mutation_lock:
             await self.pull_template(image.key, image)
             vm_id = str(uuid4())
@@ -687,6 +707,7 @@ class DockerQemuRuntime:
                 image=image,
                 vcpus=vcpus,
                 memory_gb=memory_gb,
+                disk_gb=resolved_disk_gb,
                 published_ports=published_ports,
                 novnc_port=novnc_port,
                 snapshot_name=snapshot,
@@ -713,6 +734,7 @@ class DockerQemuRuntime:
             snapshot_name=snapshot,
             vcpus=vcpus,
             memory_gb=memory_gb,
+            disk_gb=resolved_disk_gb,
         )
         return handle
 
