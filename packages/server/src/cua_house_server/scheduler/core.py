@@ -140,7 +140,6 @@ class EnvScheduler:
                     task_id=req.task_id,
                     task_path=req.task_path,
                     snapshot_name=req.snapshot_name,
-                    machine_type=req.machine_type,
                     vcpus=vcpus,
                     memory_gb=memory_gb,
                     metadata=req.metadata,
@@ -194,7 +193,6 @@ class EnvScheduler:
                         batch_id=batch_id,
                         task_id=task.task_id,
                         snapshot_name=task.snapshot_name,
-                        machine_type=task.machine_type,
                         vcpus=task.vcpus,
                         memory_gb=task.memory_gb,
                     )
@@ -583,7 +581,6 @@ class EnvScheduler:
                     gcp_dispatch_info = {
                         "task_id": candidate.task_id,
                         "snapshot_name": candidate.snapshot_name,
-                        "machine_type": candidate.machine_type,
                         "batch_id": candidate.batch_id,
                     }
                     self._refresh_batch_states_locked()
@@ -661,7 +658,6 @@ class EnvScheduler:
         """Async GCP VM creation — runs outside the main lock."""
         task_id = info["task_id"]
         snapshot_name = info["snapshot_name"]
-        machine_type = info.get("machine_type")
 
         gcp_rt = self._runtimes.get("gcp")
         if not isinstance(gcp_rt, GCPVMRuntime):
@@ -689,10 +685,9 @@ class EnvScheduler:
                 lease_id=lease_id,
                 task_id=task_id,
             )
-            handle.machine_type = machine_type
 
             logger.info("Creating GCP VM %s for task %s (machine_type=%s)...",
-                        handle.vm_name, task_id, machine_type or image.gcp_machine_type)
+                        handle.vm_name, task_id, image.gcp_machine_type)
             await gcp_rt.start_slot(handle)
 
             # TODO multi-port GCP: build urls from image.published_ports
@@ -742,7 +737,7 @@ class EnvScheduler:
                     runtime_mode="gcp",
                     vm_name=handle.vm_name,
                     vm_ip=handle.vm_ip,
-                    machine_type=machine_type or image.gcp_machine_type,
+                    machine_type=image.gcp_machine_type,
                 )
                 logger.info("GCP VM %s ready for task %s (IP=%s)", handle.vm_name, task_id, handle.vm_ip)
 

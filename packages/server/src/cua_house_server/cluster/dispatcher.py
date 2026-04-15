@@ -104,7 +104,6 @@ class ClusterDispatcher:
                     task_id=req.task_id,
                     task_path=req.task_path,
                     snapshot_name=req.snapshot_name,
-                    machine_type=req.machine_type,
                     vcpus=vcpus,
                     memory_gb=memory_gb,
                     metadata=req.metadata,

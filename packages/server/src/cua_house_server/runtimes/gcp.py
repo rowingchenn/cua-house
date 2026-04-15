@@ -37,7 +37,6 @@ class GCPSlotHandle:
     vm_project: str = ""
     boot_disk_name: str = ""
     data_disk_name: str = ""
-    machine_type: str | None = None  # per-task override from task_card.json
     # SlotHandle compat (unused but needed for scheduler duck-typing)
     cua_port: int = 5000
     novnc_port: int = 0
@@ -124,7 +123,7 @@ class GCPVMRuntime:
             ])
 
         # 2. Create VM -- prefer --image (faster) over --disk from snapshot
-        machine_type = handle.machine_type or image.gcp_machine_type
+        machine_type = image.gcp_machine_type
         cmd = [
             "compute", "instances", "create", handle.vm_name,
             f"--project={image.gcp_project}",

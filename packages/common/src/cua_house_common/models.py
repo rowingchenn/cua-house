@@ -58,19 +58,16 @@ class TaskRequirement(BaseModel):
     snapshot_name: str
     vcpus: int | None = None
     memory_gb: int | None = None
-    machine_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     task_data: TaskDataRequest | None = None
     # NOTE: os_type is intentionally NOT a client field. It is an image-static
     # property declared in images.yaml as `os_family`. Server reads it from the
     # catalog by snapshot_name. See docs/architecture/overview.md.
     #
-    # NOTE: ``vcpus`` / ``memory_gb`` take precedence over the image's
-    # defaults when set by the client (e.g. agenthle after parsing the task
-    # card's ``vm.machineType``). Legacy clients that still send ``machine_type``
-    # as a string are accepted — the value is stored for auditing but not
-    # used for scheduling. See docs/architecture/cluster.md for the
-    # cluster-mode dispatch rules.
+    # NOTE: clients translate cloud-style machine types (e.g. "n2-standard-4")
+    # into ``vcpus`` + ``memory_gb`` before submitting. cua-house never sees the
+    # original machine_type string. See docs/architecture/cluster.md for the
+    # shape-aware dispatch rules.
 
 
 class BatchCreateRequest(BaseModel):
@@ -131,7 +128,6 @@ class TaskStatus(BaseModel):
     task_id: str
     task_path: str
     snapshot_name: str
-    machine_type: str | None = None
     vcpus: int
     memory_gb: int
     metadata: dict[str, Any] = Field(default_factory=dict)
