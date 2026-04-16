@@ -353,7 +353,7 @@ class DockerQemuRuntime:
                     logger.info("pool init cache miss for %s — savevm + cache write", h.snapshot_name)
                     await h.qmp.save_snapshot(
                         h.snapshot_name,
-                        timeout_s=self.config.snapshot_save_timeout_s,
+                        timeout=self.config.snapshot_save_timeout_s,
                     )
                     self._snapshot_cache.write(ck, h.disk_path)
                 except Exception:
@@ -776,7 +776,7 @@ class DockerQemuRuntime:
             try:
                 await new_handle.qmp.save_snapshot(
                     new_handle.snapshot_name,
-                    timeout_s=self.config.snapshot_save_timeout_s,
+                    timeout=self.config.snapshot_save_timeout_s,
                 )
                 self._snapshot_cache.write(cache_key, new_handle.disk_path)
             except Exception:
@@ -884,7 +884,7 @@ class DockerQemuRuntime:
                 logger.info("cache miss for %s — savevm + cache write", cache_key.stem)
                 await handle.qmp.save_snapshot(
                     handle.snapshot_name,
-                    timeout_s=self.config.snapshot_save_timeout_s,
+                    timeout=self.config.snapshot_save_timeout_s,
                 )
                 self._snapshot_cache.write(cache_key, handle.disk_path)
             except Exception:
