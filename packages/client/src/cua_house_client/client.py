@@ -36,8 +36,14 @@ class EnvServerClient:
         if resolved_token:
             headers["Authorization"] = f"Bearer {resolved_token}"
 
+        transport = httpx.AsyncHTTPTransport(
+            retries=3,  # retry on connection errors (RemoteProtocolError, etc.)
+        )
         self._client = httpx.AsyncClient(
-            base_url=resolved_base_url, timeout=timeout, headers=headers,
+            base_url=resolved_base_url,
+            timeout=timeout,
+            headers=headers,
+            transport=transport,
         )
 
     async def aclose(self) -> None:
