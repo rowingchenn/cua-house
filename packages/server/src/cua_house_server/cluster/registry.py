@@ -140,6 +140,21 @@ class WorkerRegistry:
             session.last_heartbeat = time.monotonic()
             session.load_cpu = load_cpu
             session.load_memory = load_memory
+            # Preserve optimistic lease marks set by the dispatcher.
+            # The dispatcher marks a VM as "leased" (with a lease_id) before
+            # the worker has received the AssignTask message. If we blindly
+            # replace vm_summaries with the heartbeat data, the worker's
+            # stale "ready" state overwrites the optimistic mark, causing
+            # the dispatcher to double-book the same VM on the next tick.
+            optimistic_leases: dict[str, str] = {}
+            for vm in session.vm_summaries:
+                if vm.lease_id and vm.state == "leased":
+                    optimistic_leases[vm.vm_id] = vm.lease_id
+            for vm in vm_summaries:
+                saved_lease = optimistic_leases.get(vm.vm_id)
+                if saved_lease and vm.state == "ready" and not vm.lease_id:
+                    vm.state = "leased"
+                    vm.lease_id = saved_lease
             session.vm_summaries = vm_summaries
 
     async def apply_vm_state_update(
