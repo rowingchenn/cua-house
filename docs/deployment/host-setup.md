@@ -99,6 +99,13 @@ Edit `images.yaml`:
 > `--mode worker`, and read `/etc/cua-house/worker.env` for the
 > cluster join token.
 
+> **These paths are examples.** Adjust `WorkingDirectory` and `ExecStart`
+> to match your installation. On GCP nested-KVM hosts the repo typically
+> lives at `/home/weichenzhang/cua-house-mnc` and runs via
+> `uv run python -m cua_house_server.cli`. For cluster workers, use
+> [`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service)
+> instead — see [clone-worker.md](clone-worker.md).
+
 Create `/etc/systemd/system/cua-house-server.service`:
 
 ```ini

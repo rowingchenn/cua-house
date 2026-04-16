@@ -55,6 +55,9 @@ class TaskRequirement(BaseModel):
 
     task_id: str
     task_path: str
+    # Image catalog key (e.g. "cpu-free"), NOT the QEMU snapshot tag.
+    # The QEMU snapshot tag is a shape-based internal detail managed by
+    # the runtime and never exposed to clients.
     snapshot_name: str
     vcpus: int | None = None
     memory_gb: int | None = None
@@ -179,6 +182,7 @@ class LeaseStageResponse(BaseModel):
 class VMPoolEntry(BaseModel):
     """Configuration for a group of identical VMs in the pool."""
 
+    # Image catalog key (e.g. "cpu-free"), NOT the QEMU snapshot tag.
     snapshot_name: str
     count: int = 1
     vcpus: int = 4

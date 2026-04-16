@@ -202,8 +202,13 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 **Diagnostic shortcut**: On a failed pool slot, `docker exec <container> ps auxf` and look for `qemu-system-x86_64`. If absent, the VM never actually started — don't waste time debugging autologon or in-guest services. Check `qemu-img snapshot -l` on the template first.
 
-**Fix applied**: re-baked `cpu-free-20260413.qcow2` with a valid savevm tag (see vm-image-maintenance.md). No code change is required on the host side, but consider:
-- Pre-flight check in `_ensure_local_templates()` that `qemu-img snapshot -l` contains the expected tag, failing fast instead of waiting `ready_timeout_s` per slot.
+**Fix / current status**: This pitfall is now largely mitigated by the automatic savevm behavior introduced with shape-based snapshot tags.
+
+In **cluster mode**, snapshot tags are shape-based (e.g., `4vcpu-8gb-64gb`) and created automatically by the server on first cache miss — the template qcow2 no longer needs a pre-baked savevm tag. When a VM of a new shape is first requested, the server cold-boots it, waits for readiness, then runs `savevm` with the shape-derived tag. Subsequent VMs of the same shape load from that snapshot. The `version` field in `images.yaml` invalidates the cache, forcing a fresh cold boot + savevm cycle.
+
+In **standalone mode**, the template still needs a savevm tag matching the shape stem (i.e., the image key). If missing, the original symptom applies. Verify with `qemu-img snapshot -l /path/to/template.qcow2`.
+
+Remaining improvements to consider:
 - Wrapper `/entry.sh` monitors `VM_PID` and exits with an error if the QEMU backgrounded process dies, so containers fail fast instead of looping forever.
 - Derive `slot_vm_ip_detected` from an actual DHCP lease (e.g. `/var/lib/misc/dnsmasq.leases`) or from a successful ARP probe, not from the dnsmasq command line.
 

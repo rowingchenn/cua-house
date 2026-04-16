@@ -57,27 +57,27 @@ agenthle-dev-{variant}-boot-snap
 
 ## Image catalog configuration
 
-Each GCP image entry in `images.yaml` specifies:
+Each GCP image entry in `images.yaml` uses a nested `gcp:` section:
 
 ```yaml
 gpu-free:
   enabled: true
-  runtime_mode: gcp
-  gcp_project: sunblaze-4
-  gcp_zone: us-west1-a
-  gcp_network: osworld-vpc
-  gcp_service_account: agenthle-vm-service@sunblaze-4.iam.gserviceaccount.com
-  gcp_machine_type: g2-standard-4
-  gcp_boot_image: agenthle-dev-gpu-free-20260403     # preferred (fast boot)
-  gcp_boot_snapshot: null                              # fallback
-  gcp_data_snapshot: agenthle-dev-gpu-free-data-snap   # task data disk
-  gcp_boot_disk_gb: 64
-  gcp_data_disk_gb: 200
-  gpu_type: nvidia-l4
-  gpu_count: 1
-  default_vcpus: 4
-  default_memory_gb: 16
-  max_concurrent_vms: 2
+  os_family: linux
+  published_ports: [5000]
+  gcp:
+    project: sunblaze-4
+    zone: us-central1-a
+    network: osworld-vpc
+    service_account: agenthle-vm-service@sunblaze-4.iam.gserviceaccount.com
+    boot_snapshot: agenthle-dev-gpu-free-agents-baked-20260405
+    boot_disk_gb: 64
+    data_snapshot: agenthle-dev-gpu-free-data-snap
+    data_disk_gb: 200
+    default_disk_gb: 64
+    gpu_type: nvidia-l4
+    gpu_count: 1
+    default_machine_type: g2-standard-4
+    max_concurrent_vms: 2
 ```
 
 - `gcp_boot_image` is preferred over `gcp_boot_snapshot` because creating a VM from an image is significantly faster (~14s vs ~100s).

@@ -2,6 +2,10 @@
 
 How to update the Windows VM images used by cua-house. There are two image types with different workflows.
 
+> **For the step-by-step operational workflow** (export, test, upload, deploy),
+> see [image-update-sop.md](image-update-sop.md). This document covers image
+> internals, naming conventions, and guest-specific requirements.
+
 ## Current local images
 
 | Image key | qcow2 file | GCS object (baked) | Bake date | Description |
@@ -124,7 +128,12 @@ docker rm -f cua-house-test
 
 If the CUA server responds with HTTP 200, the image is good.
 
-### Step 4: Take savevm snapshot via QEMU monitor
+### Step 4: Take savevm snapshot via QEMU monitor (standalone / legacy only)
+
+> **Cluster mode note:** This step is only needed for legacy standalone mode.
+> In cluster mode, the server creates shape-based snapshot tags (e.g.,
+> `4vcpu-8gb-64gb`) automatically on the first cache miss for a given shape,
+> so you do not need to manually bake a `savevm` snapshot.
 
 Start a container from the new qcow2, wait for it to be ready, then save the snapshot. The recipe below is what works after the cua-house-server's accumulated patches; deviating from any of the gotchas re-runs into pitfalls 1, 3, 5.
 
@@ -210,6 +219,10 @@ qemu-img snapshot -l $QCOW2
 #                  1  cpu-free         ...      ...          ...
 ```
 
+> **Cluster mode note:** In cluster mode, the server creates shape-based
+> snapshot tags (e.g., `4vcpu-8gb-64gb`) at runtime. The template's snapshot
+> tag shown above is only used by legacy standalone mode.
+
 ### Step 5b: Upload baked qcow2 back to GCS (REQUIRED)
 
 **Always** push the baked qcow2 back to GCS. Skipping this step means the
@@ -238,9 +251,18 @@ Update `images.yaml` to point to the new qcow2:
 ```yaml
 cpu-free:
   enabled: true
-  runtime_mode: local
-  template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260405.qcow2
+  os_family: windows
+  published_ports: [5000]
+  local:
+    template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260415.qcow2
+    gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260415.qcow2
+    version: "20260415"
+    default_vcpus: 4
+    default_memory_gb: 8
 ```
+
+> **Bump `version`** every time you re-bake the template. The server uses
+> this field to detect stale local copies and re-pull from `gcs_uri`.
 
 Restart the cua-house server:
 

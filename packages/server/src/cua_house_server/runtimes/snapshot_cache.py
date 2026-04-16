@@ -34,7 +34,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _shape_stem(vcpus: int, memory_gb: int, disk_gb: int) -> str:
+def shape_stem(vcpus: int, memory_gb: int, disk_gb: int) -> str:
+    """Return the canonical shape string used as QEMU snapshot tag and cache key."""
     return f"{vcpus}vcpu-{memory_gb}gb-{disk_gb}gb"
 
 
@@ -52,7 +53,7 @@ class CacheKey:
 
     @property
     def stem(self) -> str:
-        return _shape_stem(self.vcpus, self.memory_gb, self.disk_gb)
+        return shape_stem(self.vcpus, self.memory_gb, self.disk_gb)
 
 
 class SnapshotCache:

@@ -19,13 +19,16 @@ images:
     os_family: windows            # windows | linux
     published_ports: [5000]       # guest TCP ports the image exposes
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
-      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
+      template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260415.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260415.qcow2
       # Bump when re-baking the qcow2 — the worker's snapshot cache keys
       # off (image, version, vcpus, memory_gb, disk_gb), so a new version
       # forces a fresh cold boot + savevm the next time a VM of this shape
-      # is added. Convention: bake date (YYYYMMDD).
-      version: "20260413"
+      # is added. The savevm is automatic: on first cache miss the server
+      # cold-boots the VM, waits for readiness, then creates a shape-based
+      # snapshot tag (e.g. 4vcpu-8gb-64gb). No manual savevm is required.
+      # Convention: bake date (YYYYMMDD).
+      version: "20260415"
       default_vcpus: 4
       default_memory_gb: 8
     gcp:

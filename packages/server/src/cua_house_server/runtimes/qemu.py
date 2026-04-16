@@ -254,13 +254,21 @@ class DockerQemuRuntime:
         pool_entries: list[VMPoolEntry],
         images: dict[str, ImageSpec],
     ) -> list[VMHandle]:
-        """Start N containers from pre-baked qcow2 templates via loadvm.
+        """Start N containers using snapshot-cache acceleration.
 
         Called once at server start.  All VMs boot in parallel.
         Returns VMHandle list with state READY and QMP connected.
-        Ready in ~30s (loadvm) instead of ~4-5 min (cold boot).
+
+        Uses the same cache logic as ``add_vm`` (cluster hot-plug):
+          - Cache hit  → reflink from cache, loadvm with shape tag (~30s).
+          - Cache miss → reflink from template, cold boot (~4-5 min),
+            savevm with shape tag, cache write for next time.
+
+        First start after a version bump will cold-boot once per unique
+        shape, then subsequent starts are fast.
         """
         from uuid import uuid4
+        from cua_house_server.runtimes.snapshot_cache import CacheKey, shape_stem
 
         published_port_pool = self._published_port_pool
         novnc_ports = self._novnc_port_pool
@@ -268,58 +276,98 @@ class DockerQemuRuntime:
         # Ensure template qcow2 files exist locally (pull from GCS if needed)
         await self._ensure_local_templates(images)
 
-        handles: list[VMHandle] = []
-        prepare_args: list[dict] = []
+        # Build per-VM specs with cache lookups.
+        # Each spec carries (prepare_kwargs, cache_hit, cached_path, cache_key).
+        _Spec = tuple[dict, bool, Path | None, CacheKey]
+        vm_specs: list[_Spec] = []
         for entry in pool_entries:
-            # snapshot_name doubles as the image catalog key for local VMs
+            # entry.snapshot_name is the image catalog key (e.g. "cpu-free")
             image = images.get(entry.snapshot_name)
             if image is None or not image.enabled:
                 logger.warning("Skipping disabled/unknown image %s in vm_pool", entry.snapshot_name)
                 continue
+            resolved_disk_gb = entry.disk_gb if entry.disk_gb else image.default_disk_gb
+            snapshot = shape_stem(entry.vcpus, entry.memory_gb, resolved_disk_gb)
+            cache_key = CacheKey(
+                image_key=image.key,
+                image_version=image.version,
+                vcpus=entry.vcpus,
+                memory_gb=entry.memory_gb,
+                disk_gb=resolved_disk_gb,
+            )
+            cached_path = self._snapshot_cache.lookup(cache_key)
             for _ in range(entry.count):
                 vm_id = str(uuid4())
-                # Allocate one host loopback port per declared guest port
                 published_ports = {
                     guest_port: published_port_pool.allocate()
                     for guest_port in image.published_ports
                 }
                 novnc_port = novnc_ports.allocate()
-                prepare_args.append(dict(
+                args = dict(
                     vm_id=vm_id,
                     image=image,
                     vcpus=entry.vcpus,
                     memory_gb=entry.memory_gb,
-                    disk_gb=entry.disk_gb,
+                    disk_gb=resolved_disk_gb,
                     published_ports=published_ports,
                     novnc_port=novnc_port,
-                    snapshot_name=entry.snapshot_name,
-                ))
+                    snapshot_name=snapshot,
+                )
+                vm_specs.append((args, cached_path is not None, cached_path, cache_key))
 
-        # Copy template qcow2 files in parallel (instant on XFS via reflink)
-        logger.info("Copying %d template qcow2 files in parallel...", len(prepare_args))
+        # Prepare slot disks in parallel (instant on XFS via reflink)
+        logger.info("Preparing %d VM slots in parallel...", len(vm_specs))
         copy_start = time.perf_counter()
-        prepare_results = await asyncio.gather(
-            *[asyncio.to_thread(self._prepare_vm, **args) for args in prepare_args],
-        )
-        copy_s = time.perf_counter() - copy_start
-        logger.info("Template copies completed in %.1fs", copy_s)
-        handles = list(prepare_results)
 
-        # Start all VMs in parallel via loadvm (pre-baked snapshot)
-        async def _boot_one(h: VMHandle) -> None:
-            await self._start_vm_container(h)
+        async def _prepare_one(
+            args: dict, cache_hit: bool, cached_path: Path | None, _ck: CacheKey,
+        ) -> VMHandle:
+            if cache_hit and cached_path is not None:
+                h = await asyncio.to_thread(
+                    self._prepare_vm_from_source,
+                    source_qcow2=cached_path,
+                    **args,
+                )
+                h.from_cache = True
+            else:
+                h = await asyncio.to_thread(self._prepare_vm, **args)
+                h.from_cache = False
+            return h
+
+        handles = list(await asyncio.gather(
+            *[_prepare_one(*spec) for spec in vm_specs],
+        ))
+        cache_keys = [spec[3] for spec in vm_specs]
+        copy_s = time.perf_counter() - copy_start
+        logger.info("Slot preparation completed in %.1fs", copy_s)
+
+        # Boot all VMs in parallel
+        async def _boot_one(h: VMHandle, ck: CacheKey) -> None:
+            await self._start_vm_container(h, use_loadvm=h.from_cache)
             await self.wait_ready(h)
             h.ready_at = datetime.now(UTC)
             h.qmp = QMPClient(h.container_name)
+            # On cache miss, save snapshot and write to cache for next time
+            if not h.from_cache:
+                try:
+                    logger.info("pool init cache miss for %s — savevm + cache write", h.snapshot_name)
+                    await h.qmp.save_snapshot(
+                        h.snapshot_name,
+                        timeout_s=self.config.snapshot_save_timeout_s,
+                    )
+                    self._snapshot_cache.write(ck, h.disk_path)
+                except Exception:
+                    logger.warning("savevm/cache-write failed during pool init; VM still usable", exc_info=True)
             self.event_logger.emit(
                 "vm_ready",
                 vm_id=h.vm_id,
                 container_name=h.container_name,
                 snapshot_name=h.snapshot_name,
+                from_cache=h.from_cache,
             )
 
         results = await asyncio.gather(
-            *[_boot_one(h) for h in handles],
+            *[_boot_one(h, ck) for h, ck in zip(handles, cache_keys)],
             return_exceptions=True,
         )
         ready_handles: list[VMHandle] = []
@@ -337,8 +385,9 @@ class DockerQemuRuntime:
                 ready_handles.append(handle)
 
         logger.info(
-            "VM pool initialized: %d/%d VMs ready",
+            "VM pool initialized: %d/%d VMs ready (cache hits: %d)",
             len(ready_handles), len(handles),
+            sum(1 for h in ready_handles if h.from_cache),
         )
         return ready_handles
 
@@ -405,7 +454,8 @@ class DockerQemuRuntime:
         storage_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy template qcow2 (contains pre-baked savevm snapshot).
+        # Copy template qcow2 to slot.  The template is a clean base image;
+        # shape-based snapshot tags are created at runtime (not pre-baked).
         # Uses --reflink=auto: instant on XFS, falls back to full copy on ext4.
         # Docker image expects "data.qcow2" (DISK_NAME=data in dockur/windows)
         disk = storage_dir / "data.qcow2"
@@ -673,26 +723,65 @@ class DockerQemuRuntime:
     async def replace_broken_vm(
         self, handle: VMHandle, image: ImageSpec,
     ) -> VMHandle:
-        """Destroy a broken VM and create a fresh replacement from template."""
+        """Destroy a broken VM and create a fresh replacement using cache."""
+        from cua_house_server.runtimes.snapshot_cache import CacheKey
+
         logger.warning("Replacing broken VM %s (%s)", handle.vm_id, handle.container_name)
         self._run(["docker", "rm", "-f", handle.container_name], check=False)
         slot_root = self.slots_root / handle.vm_id
         if slot_root.exists():
             shutil.rmtree(slot_root)
 
-        new_handle = self._prepare_vm(
-            vm_id=handle.vm_id,
-            image=image,
+        cache_key = CacheKey(
+            image_key=image.key,
+            image_version=image.version,
             vcpus=handle.vcpus,
             memory_gb=handle.memory_gb,
             disk_gb=handle.disk_gb,
-            published_ports=handle.published_ports,
-            novnc_port=handle.novnc_port,
-            snapshot_name=handle.snapshot_name,
         )
-        await self._start_vm_container(new_handle)
+        cached_path = self._snapshot_cache.lookup(cache_key)
+
+        if cached_path is not None:
+            new_handle = self._prepare_vm_from_source(
+                vm_id=handle.vm_id,
+                source_qcow2=cached_path,
+                image=image,
+                vcpus=handle.vcpus,
+                memory_gb=handle.memory_gb,
+                disk_gb=handle.disk_gb,
+                published_ports=handle.published_ports,
+                novnc_port=handle.novnc_port,
+                snapshot_name=handle.snapshot_name,
+            )
+            new_handle.from_cache = True
+            await self._start_vm_container(new_handle, use_loadvm=True)
+        else:
+            new_handle = self._prepare_vm(
+                vm_id=handle.vm_id,
+                image=image,
+                vcpus=handle.vcpus,
+                memory_gb=handle.memory_gb,
+                disk_gb=handle.disk_gb,
+                published_ports=handle.published_ports,
+                novnc_port=handle.novnc_port,
+                snapshot_name=handle.snapshot_name,
+            )
+            new_handle.from_cache = False
+            await self._start_vm_container(new_handle, use_loadvm=False)
+
         await self.wait_ready(new_handle)
         new_handle.qmp = QMPClient(new_handle.container_name)
+
+        if not new_handle.from_cache:
+            try:
+                await new_handle.qmp.save_snapshot(
+                    new_handle.snapshot_name,
+                    timeout_s=self.config.snapshot_save_timeout_s,
+                )
+                self._snapshot_cache.write(cache_key, new_handle.disk_path)
+            except Exception:
+                logger.warning("savevm/cache-write failed on replacement VM; VM still usable", exc_info=True)
+
         return new_handle
 
     def vm_published_url(self, handle: VMHandle, guest_port: int) -> str:
@@ -711,7 +800,6 @@ class DockerQemuRuntime:
         vcpus: int,
         memory_gb: int,
         disk_gb: int | None = None,
-        snapshot_name: str | None = None,
     ) -> VMHandle:
         """Hot-add a single VM with snapshot-cache acceleration.
 
@@ -725,10 +813,12 @@ class DockerQemuRuntime:
         *after* CUA readiness so the first task doesn't wait for double I/O.
         """
         from uuid import uuid4
-        from cua_house_server.runtimes.snapshot_cache import CacheKey
+        from cua_house_server.runtimes.snapshot_cache import CacheKey, shape_stem
 
-        snapshot = snapshot_name or image.key
         resolved_disk_gb = disk_gb if disk_gb is not None else image.default_disk_gb
+        # Snapshot tag follows the VM shape, not the image key. This is an
+        # internal QEMU detail — never persisted in docs, GCS, or config.
+        snapshot = shape_stem(vcpus, memory_gb, resolved_disk_gb)
         cache_key = CacheKey(
             image_key=image.key,
             image_version=image.version,

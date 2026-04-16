@@ -12,7 +12,7 @@ This document details the pre-baked qcow2 model, snapshot lifecycle, and GCP VM 
 
 ### Template qcow2
 
-Each image variant (e.g. `cpu-free`) has a versioned template qcow2 file created offline. It contains a fully installed Windows OS with CUA server and agent tooling, **plus a pre-baked QEMU internal snapshot** (`savevm cpu-free`) stored inside the file.
+Each image variant (e.g. `cpu-free`) has a versioned template qcow2 file created offline. It contains a fully installed Windows OS with CUA server and agent tooling as a clean base image (no pre-baked snapshot tags). The server creates shape-based QEMU snapshot tags (e.g., `4vcpu-8gb-64gb`) at runtime on first boot, then caches them for fast subsequent `loadvm`.
 
 Location on host: configured via `template_qcow2_path` in the image catalog YAML (e.g., `/home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260405.qcow2`).
 
@@ -28,7 +28,7 @@ This is a standalone qcow2 (not a COW overlay) — the snapshot state is embedde
 
 ### Startup via `-loadvm` (fast path)
 
-QEMU starts with `-loadvm cpu-free`, which restores the pre-baked snapshot directly:
+QEMU starts with `-loadvm <shape-tag>`, where the shape tag is derived from the VM's vcpus, memory, and disk configuration (e.g., `4vcpu-8gb-64gb`). This restores the cached snapshot directly:
 
 - No Windows cold boot (~5 min)
 - VM is responsive in ~30s (snapshot resume)
@@ -39,11 +39,11 @@ The `-loadvm` flag is injected into `boot.sh` via the `LOADVM_SNAPSHOT` containe
 
 Between tasks, a QMP `loadvm` reverts the VM to the clean snapshot state:
 
-1. **Server startup**: Docker container starts → QEMU loads `-loadvm cpu-free` → CUA server is responsive (~30s).
+1. **Server startup**: Docker container starts → QEMU loads `-loadvm <shape-tag>` → CUA server is responsive (~30s).
 2. **Assignment**: scheduler marks VM as READY and assigns it to a queued task.
 3. **Task runs**: agent interacts with the VM. All disk writes go to the VM's private `vm.qcow2`.
 4. **Completion**: task completes or times out; scheduler calls `revert_vm()`.
-5. **loadvm (revert)**: QMP client sends `loadvm cpu-free` → `cont`. This restores exact VM state from the snapshot (~15-30s). CUA server is responsive again near-instantly.
+5. **loadvm (revert)**: QMP client sends `loadvm <shape-tag>` → `cont`. This restores exact VM state from the snapshot (~15-30s). CUA server is responsive again near-instantly.
 6. **Repeat**: VM returns to READY state, available for the next task.
 
 ### Requirements for snapshot support
@@ -124,7 +124,7 @@ Key operations:
 
 ```python
 qmp = QMPClient("cua-house-env-abc123")
-await qmp.load_snapshot("cpu-free")   # loadvm -> cont  (task revert)
+await qmp.load_snapshot("<shape-tag>") # loadvm -> cont  (task revert)
 await qmp.query_status()              # check if VM is running
 await qmp.is_alive()                  # bool health check
 ```

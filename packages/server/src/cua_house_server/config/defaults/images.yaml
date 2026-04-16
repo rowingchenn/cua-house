@@ -4,9 +4,9 @@ images:
     os_family: windows
     published_ports: [5000]
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
-      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
-      version: "20260413"  # bump when re-baking; invalidates worker snapshot cache
+      template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260415.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260415.qcow2
+      version: "20260415"  # bump when re-baking; invalidates worker snapshot cache
       default_vcpus: 4
       default_memory_gb: 8
     gcp:
@@ -20,12 +20,13 @@ images:
       max_concurrent_vms: 4
 
   cpu-license:
-    enabled: false
+    enabled: true
     os_family: windows
     published_ports: [5000]
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-license/cpu-license-20260405.qcow2
-      version: "20260405"
+      template_qcow2_path: /mnt/xfs/images/cpu-license/cpu-license-20260415.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-license/cpu-license-20260415.qcow2
+      version: "20260415"
       default_vcpus: 4
       default_memory_gb: 16
     gcp:
@@ -61,9 +62,9 @@ images:
     os_family: linux
     published_ports: [5000]
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
-      gcs_uri: gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2
-      version: "20260408"
+      template_qcow2_path: /mnt/xfs/images/cpu-free-ubuntu/cpu-free-ubuntu-20260415.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260415.qcow2
+      version: "20260415"
       default_vcpus: 4
       default_memory_gb: 8
     gcp:
