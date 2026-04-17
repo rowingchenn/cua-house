@@ -226,8 +226,13 @@ def create_app(
                 path=(host_config.cluster.master_bind_path if host_config.cluster else "/v1/cluster/ws"),
             )
         )
+        assert cluster_dispatcher is not None
         app.include_router(
-            build_cluster_api_router(registry=worker_registry, pool_spec=pool_spec)
+            build_cluster_api_router(
+                registry=worker_registry,
+                pool_spec=pool_spec,
+                dispatcher=cluster_dispatcher,
+            )
         )
 
     # Register proxy catch-all routes (must be last)

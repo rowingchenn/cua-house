@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from cua_house_common.models import BatchState, TaskState
+from cua_house_server.cluster.dispatcher import ClusterDispatcher
 from cua_house_server.cluster.pool_spec import ClusterPoolSpec, PoolAssignment
 from cua_house_server.cluster.registry import WorkerRegistry
 
@@ -36,6 +38,7 @@ def build_cluster_api_router(
     *,
     registry: WorkerRegistry,
     pool_spec: ClusterPoolSpec,
+    dispatcher: ClusterDispatcher,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/cluster")
 
@@ -91,11 +94,52 @@ def build_cluster_api_router(
         )
         return spec
 
+    @router.get("/tasks")
+    async def list_tasks(state: str | None = None) -> list[dict[str, Any]]:
+        """List all tasks master currently knows about.
+
+        Optional ``state`` query param filters by ``TaskState`` value
+        (e.g. ``?state=queued``). Read-only, safe for monitoring.
+        """
+        parsed: TaskState | None = None
+        if state is not None:
+            try:
+                parsed = TaskState(state)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid state: {state!r}. valid: {[s.value for s in TaskState]}",
+                ) from exc
+        tasks = await dispatcher.list_tasks(state=parsed)
+        return [t.model_dump(mode="json") for t in tasks]
+
+    @router.get("/batches")
+    async def list_batches(state: str | None = None) -> list[dict[str, Any]]:
+        """List all batches master currently knows about.
+
+        Optional ``state`` query param filters by ``BatchState`` value.
+        """
+        parsed: BatchState | None = None
+        if state is not None:
+            try:
+                parsed = BatchState(state)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid state: {state!r}. valid: {[s.value for s in BatchState]}",
+                ) from exc
+        batches = await dispatcher.list_batches(state=parsed)
+        return [b.model_dump(mode="json") for b in batches]
+
     @router.get("/status")
     async def cluster_status() -> dict[str, Any]:
         sessions = await registry.snapshot()
         online = sum(1 for s in sessions if s.online)
         all_vms = [vm for s in sessions for vm in s.vm_summaries]
+        tasks = await dispatcher.list_tasks()
+        task_state_counts = {s.value: 0 for s in TaskState}
+        for t in tasks:
+            task_state_counts[t.state.value] = task_state_counts.get(t.state.value, 0) + 1
         return {
             "workers_total": len(sessions),
             "workers_online": online,
@@ -105,6 +149,8 @@ def build_cluster_api_router(
             "vm_warming": sum(1 for vm in all_vms if vm.warming),
             "vm_from_cache": sum(1 for vm in all_vms if vm.from_cache),
             "pool_assignments": len(pool_spec.assignments),
+            "tasks_total": len(tasks),
+            "tasks_by_state": task_state_counts,
         }
 
     return router
