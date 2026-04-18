@@ -338,10 +338,12 @@ class ClusterDispatcher:
             self._leases[lease_id] = (task.task_id, session.worker_id)
             # Optimistically mark VM leased so the next tick / a concurrent
             # reconciler tick doesn't try to book the same slot.
+            import time as _time
             for vm in session.vm_summaries:
                 if vm.vm_id == vm_id:
                     vm.state = "leased"
                     vm.lease_id = lease_id
+                    vm._mark_time = _time.monotonic()  # type: ignore[attr-defined]
                     break
         sent = await self.registry.send(session.worker_id, env)
         if not sent:

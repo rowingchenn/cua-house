@@ -705,20 +705,54 @@ class DockerQemuRuntime:
         logger.info("VM %s reverted in %.1fs", handle.vm_id, revert_s)
 
     async def _wait_cua_ready(self, handle: VMHandle, timeout: float = 30) -> None:
-        """Poll CUA /status until 200.  Used after loadvm (short timeout)."""
+        """Poll CUA /status until 200, then verify functional readiness.
+
+        CUA /status 200 means the HTTP server is up, but on Windows the
+        user environment (PATH, profile) may still be loading after a
+        cold boot or loadvm.  A lightweight ``run_command echo ok`` probe
+        confirms the guest shell is actually usable before we declare the
+        VM ready for task dispatch.
+        """
         primary_port = next(iter(handle.published_ports.values()))
-        url = f"http://127.0.0.1:{primary_port}/status"
+        base = f"http://127.0.0.1:{primary_port}"
         deadline = asyncio.get_running_loop().time() + timeout
         async with httpx.AsyncClient(timeout=10) as client:
+            # Phase 1: wait for /status 200
             while asyncio.get_running_loop().time() < deadline:
                 try:
-                    resp = await client.get(url)
+                    resp = await client.get(f"{base}/status")
                     if resp.status_code == 200:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                raise RuntimeError(f"CUA not ready on VM {handle.vm_id} after {timeout}s")
+
+            # Phase 2: functional probe — run a trivial command to confirm
+            # the guest shell is usable (Windows user profile loaded, etc.)
+            remaining = max(1.0, deadline - asyncio.get_running_loop().time())
+            probe_deadline = asyncio.get_running_loop().time() + min(remaining, 15.0)
+            while asyncio.get_running_loop().time() < probe_deadline:
+                try:
+                    probe = await client.post(
+                        f"{base}/cmd",
+                        json={"command": "run_command", "params": {"command": "echo cua_ready"}},
+                        timeout=10,
+                    )
+                    text = probe.text or ""
+                    if "cua_ready" in text:
                         return
                 except Exception:
                     pass
                 await asyncio.sleep(1)
-        raise RuntimeError(f"CUA not ready on VM {handle.vm_id} after {timeout}s")
+            # If the probe never succeeds, still proceed — the status check
+            # passed, so CUA is up. The probe failure might be a benign
+            # /cmd format mismatch on non-standard CUA builds.
+            logger.warning(
+                "VM %s: CUA /status OK but functional probe did not confirm; proceeding anyway",
+                handle.vm_id,
+            )
 
     async def replace_broken_vm(
         self, handle: VMHandle, image: ImageSpec,

@@ -49,24 +49,36 @@ class EnvServerClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """HTTP request with retry on transient connection errors."""
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                response = await self._client.request(method, url, **kwargs)
+                response.raise_for_status()
+                return response
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as exc:
+                last_exc = exc
+                if attempt < 3:
+                    wait = 0.5 * (2 ** attempt)
+                    logger.warning("request %s %s failed (attempt %d): %s — retrying in %.1fs", method, url, attempt + 1, exc, wait)
+                    await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
     async def submit_batch(self, request: BatchCreateRequest) -> dict[str, Any]:
-        response = await self._client.post("/v1/batches", json=request.model_dump(mode="json"))
-        response.raise_for_status()
+        response = await self._request("POST", "/v1/batches", json=request.model_dump(mode="json"))
         return response.json()
 
     async def get_batch(self, batch_id: str) -> dict[str, Any]:
-        response = await self._client.get(f"/v1/batches/{batch_id}")
-        response.raise_for_status()
+        response = await self._request("GET", f"/v1/batches/{batch_id}")
         return response.json()
 
     async def heartbeat_batch(self, batch_id: str) -> dict[str, Any]:
-        response = await self._client.post(f"/v1/batches/{batch_id}/heartbeat")
-        response.raise_for_status()
+        response = await self._request("POST", f"/v1/batches/{batch_id}/heartbeat")
         return response.json()
 
     async def get_task(self, task_id: str) -> dict[str, Any]:
-        response = await self._client.get(f"/v1/tasks/{task_id}")
-        response.raise_for_status()
+        response = await self._request("GET", f"/v1/tasks/{task_id}")
         return response.json()
 
     async def cancel_batch(
@@ -78,16 +90,14 @@ class EnvServerClient:
     ) -> dict[str, Any]:
         from cua_house_common.models import BatchCancelRequest
         request = BatchCancelRequest(reason=reason, details=details or {})
-        response = await self._client.post(
-            f"/v1/batches/{batch_id}/cancel",
+        response = await self._request(
+            "POST", f"/v1/batches/{batch_id}/cancel",
             json=request.model_dump(mode="json"),
         )
-        response.raise_for_status()
         return response.json()
 
     async def heartbeat(self, lease_id: str) -> dict[str, Any]:
-        response = await self._client.post(f"/v1/leases/{lease_id}/heartbeat")
-        response.raise_for_status()
+        response = await self._request("POST", f"/v1/leases/{lease_id}/heartbeat")
         return response.json()
 
     async def complete(
@@ -98,21 +108,19 @@ class EnvServerClient:
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request = LeaseCompleteRequest(final_status=final_status, details=details or {})
-        response = await self._client.post(
-            f"/v1/leases/{lease_id}/complete",
+        response = await self._request(
+            "POST", f"/v1/leases/{lease_id}/complete",
             json=request.model_dump(mode="json"),
         )
         response.raise_for_status()
         return response.json()
 
     async def stage_runtime(self, lease_id: str) -> dict[str, Any]:
-        response = await self._client.post(f"/v1/leases/{lease_id}/stage-runtime")
-        response.raise_for_status()
+        response = await self._request("POST", f"/v1/leases/{lease_id}/stage-runtime")
         return response.json()
 
     async def stage_eval(self, lease_id: str) -> dict[str, Any]:
-        response = await self._client.post(f"/v1/leases/{lease_id}/stage-eval")
-        response.raise_for_status()
+        response = await self._request("POST", f"/v1/leases/{lease_id}/stage-eval")
         return response.json()
 
     # ------------------------------------------------------------------

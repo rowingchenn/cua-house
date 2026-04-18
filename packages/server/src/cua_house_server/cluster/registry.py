@@ -140,6 +140,31 @@ class WorkerRegistry:
             session.last_heartbeat = time.monotonic()
             session.load_cpu = load_cpu
             session.load_memory = load_memory
+            # Preserve optimistic lease marks set by the dispatcher.
+            # The dispatcher marks a VM as "leased" (with a lease_id and
+            # _mark_time) before the worker has received the AssignTask
+            # message. If we blindly replace vm_summaries, the worker's
+            # stale "ready" overwrites the mark → double-booking.
+            #
+            # We ONLY restore leases that have a _mark_time (set by the
+            # dispatcher in _try_assign) and are recent (< 60s). Leases
+            # reported by the worker (from stale state after restart) do
+            # NOT get _mark_time, so they are never forcibly restored —
+            # the heartbeat data is authoritative for those.
+            now = time.monotonic()
+            dispatcher_marks: dict[str, tuple[str, float]] = {}
+            for vm in session.vm_summaries:
+                mark_time = getattr(vm, "_mark_time", 0.0)
+                if vm.lease_id and vm.state == "leased" and mark_time:
+                    dispatcher_marks[vm.vm_id] = (vm.lease_id, mark_time)
+            for vm in vm_summaries:
+                saved = dispatcher_marks.get(vm.vm_id)
+                if saved and vm.state == "ready" and not vm.lease_id:
+                    saved_lease, mark_time = saved
+                    if (now - mark_time) < 60:
+                        vm.state = "leased"
+                        vm.lease_id = saved_lease
+                        vm._mark_time = mark_time  # type: ignore[attr-defined]
             session.vm_summaries = vm_summaries
 
     async def apply_vm_state_update(
