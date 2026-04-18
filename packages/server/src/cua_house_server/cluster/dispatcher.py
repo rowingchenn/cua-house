@@ -138,6 +138,30 @@ class ClusterDispatcher:
         async with self._lock:
             return self._tasks[task_id].model_copy(deep=True)
 
+    async def list_tasks(self, *, state: TaskState | None = None) -> list[TaskStatus]:
+        """Snapshot of all tasks currently in master's memory.
+
+        Read-only, intended for monitoring. Use ``state`` to filter (e.g.
+        ``TaskState.QUEUED`` to inspect the dispatch backlog).
+        """
+        async with self._lock:
+            tasks = self._tasks.values()
+            if state is not None:
+                tasks = (t for t in tasks if t.state == state)
+            return [t.model_copy(deep=True) for t in tasks]
+
+    async def list_batches(self, *, state: BatchState | None = None) -> list[BatchStatus]:
+        """Snapshot of all batches currently in master's memory.
+
+        Returns a snapshot with freshly-computed task states, matching what
+        ``get_batch`` returns for a single batch.
+        """
+        async with self._lock:
+            batches = self._batches.values()
+            if state is not None:
+                batches = (b for b in batches if b.state == state)
+            return [self._snapshot_batch(b) for b in batches]
+
     async def lookup_lease_endpoint(self, lease_id: str) -> str | None:
         """Return the worker's lease_endpoint URL for a live lease.
 
