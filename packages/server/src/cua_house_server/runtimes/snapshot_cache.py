@@ -62,7 +62,11 @@ class SnapshotCache:
     def __init__(self, cache_dir: Path, qemu_fingerprint: str) -> None:
         self.cache_dir = cache_dir
         self.qemu_fingerprint = qemu_fingerprint
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Lazy mkdir: deferred until first write so a throwaway QEMU runtime
+        # (e.g. master-mode default) doesn't need a writable cache path.
+
+    def _ensure_dir(self) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def lookup(self, key: CacheKey) -> Path | None:
         qcow2 = self.cache_dir / key.dir_path / f"{key.stem}.qcow2"
@@ -89,6 +93,7 @@ class SnapshotCache:
         key: CacheKey,
         source_qcow2: Path,
     ) -> Path | None:
+        self._ensure_dir()
         dest_dir = self.cache_dir / key.dir_path
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{key.stem}.qcow2"
