@@ -6,15 +6,15 @@ from pydantic import TypeAdapter
 
 from cua_house_server.cluster.protocol import (
     AssignTask,
+    CachedShape,
     Envelope,
     Heartbeat,
     MasterToWorker,
-    PoolOp,
-    PoolOpArgs,
-    PoolOpResult,
     Register,
+    ReleaseLease,
     Shutdown,
-    VMStateUpdate,
+    TaskBound,
+    TaskCompleted,
     WorkerCapacity,
     WorkerToMaster,
     WorkerVMSummary,
@@ -44,13 +44,13 @@ def test_register_roundtrip() -> None:
     _roundtrip_w2m(msg)
 
 
-def test_heartbeat_roundtrip_with_vms() -> None:
-    from cua_house_server.cluster.protocol import CachedShape
+def test_heartbeat_roundtrip_with_vms_and_cache() -> None:
     msg = Heartbeat(
         vm_summaries=[
             WorkerVMSummary(
-                vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"
-            )
+                vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64,
+                lease_id="l1",
+            ),
         ],
         cached_shapes=[
             CachedShape(image_key="cpu-free", image_version="v1", vcpus=4, memory_gb=8, disk_gb=64),
@@ -59,28 +59,32 @@ def test_heartbeat_roundtrip_with_vms() -> None:
     _roundtrip_w2m(msg)
 
 
-def test_vm_state_update_roundtrip() -> None:
-    _roundtrip_w2m(VMStateUpdate(vm_id="v1", state="leased", lease_id="l1"))
+def test_task_bound_roundtrip() -> None:
+    _roundtrip_w2m(
+        TaskBound(
+            task_id="t1", lease_id="l1", vm_id="v1", from_cache=True,
+            urls={5000: "http://x:16001"}, novnc_url="http://x:18001",
+        )
+    )
 
 
-def test_pool_op_result_roundtrip() -> None:
-    _roundtrip_w2m(PoolOpResult(op_id="op1", ok=True, produced_vm_id="v1"))
+def test_task_completed_roundtrip() -> None:
+    _roundtrip_w2m(
+        TaskCompleted(task_id="t1", lease_id="l1", final_status="completed")
+    )
 
 
 def test_assign_task_roundtrip() -> None:
     _roundtrip_m2w(
-        AssignTask(task_id="t1", lease_id="l1", vm_id="v1", image_key="cpu-free")
+        AssignTask(
+            task_id="t1", lease_id="l1", image_key="cpu-free",
+            vcpus=4, memory_gb=8, disk_gb=64,
+        )
     )
 
 
-def test_pool_op_roundtrip_all_kinds() -> None:
-    for op in ("ADD_IMAGE", "REMOVE_IMAGE", "ADD_VM", "REMOVE_VM"):
-        msg = PoolOp(
-            op_id=f"op-{op}",
-            op=op,  # type: ignore[arg-type]
-            args=PoolOpArgs(image_key="cpu-free", vcpus=4, memory_gb=8),
-        )
-        _roundtrip_m2w(msg)
+def test_release_lease_roundtrip() -> None:
+    _roundtrip_m2w(ReleaseLease(lease_id="l1", final_status="completed"))
 
 
 def test_shutdown_roundtrip() -> None:

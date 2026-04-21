@@ -54,7 +54,7 @@ async def test_heartbeat_updates_vm_summaries() -> None:
         ws=ws,  # type: ignore[arg-type]
     )
     vms = [
-        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
+        WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, lease_id="l1"),
     ]
     await reg.apply_heartbeat("w1", vm_summaries=vms)
     session = await reg.get("w1")
@@ -81,7 +81,8 @@ async def test_reap_stale_marks_offline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_free_vm_for_matches_only_ready() -> None:
+async def test_has_cached_shape_matches_exact_tuple() -> None:
+    from cua_house_server.cluster.protocol import CachedShape
     reg = WorkerRegistry()
     ws = _FakeWS()
     await reg.register(
@@ -90,13 +91,24 @@ async def test_free_vm_for_matches_only_ready() -> None:
     )
     await reg.apply_heartbeat(
         "w1",
-        vm_summaries=[
-            WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="leased"),
-            WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=8, memory_gb=16, disk_gb=64, state="ready"),
+        vm_summaries=[],
+        cached_shapes=[
+            CachedShape(image_key="cpu-free", image_version="v20260419", vcpus=4, memory_gb=8, disk_gb=64),
         ],
     )
     session = await reg.get("w1")
     assert session is not None
-    assert session.free_vm_for("cpu-free", 4, 8, 64) is not None
-    assert session.free_vm_for("cpu-free", 4, 8, 64).vm_id == "v2"
-    assert session.free_vm_for("cpu-free", 16, 32, 64) is None
+    assert session.has_cached_shape(
+        image_key="cpu-free", image_version="v20260419",
+        vcpus=4, memory_gb=8, disk_gb=64,
+    )
+    # Version miss
+    assert not session.has_cached_shape(
+        image_key="cpu-free", image_version="v20260101",
+        vcpus=4, memory_gb=8, disk_gb=64,
+    )
+    # Shape miss
+    assert not session.has_cached_shape(
+        image_key="cpu-free", image_version="v20260419",
+        vcpus=8, memory_gb=16, disk_gb=64,
+    )

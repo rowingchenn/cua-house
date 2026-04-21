@@ -176,15 +176,3 @@ class LeaseStageResponse(BaseModel):
     bytes_staged: int = 0
 
 
-# ── Config models ────────────────────────────────────────────────────
-
-
-class VMPoolEntry(BaseModel):
-    """Configuration for a group of identical VMs in the pool."""
-
-    # Image catalog key (e.g. "cpu-free"), NOT the QEMU snapshot tag.
-    snapshot_name: str
-    count: int = 1
-    vcpus: int = 4
-    memory_gb: int = 8
-    disk_gb: int = 64

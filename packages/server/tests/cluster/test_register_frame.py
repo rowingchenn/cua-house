@@ -28,7 +28,6 @@ def _host_config() -> HostRuntimeConfig:
         heartbeat_ttl_s=60,
         ready_timeout_s=60,
         readiness_poll_interval_s=1,
-        idle_slot_ttl_s=60,
         published_port_range=(16000, 16010),
         novnc_port_range=(18000, 18010),
     )

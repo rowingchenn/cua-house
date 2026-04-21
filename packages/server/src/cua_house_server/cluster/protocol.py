@@ -10,12 +10,18 @@ Design notes:
   receive Envelopes) but the payload unions are directional — ``Register``
   only flows from worker, ``AssignTask`` only from master, etc. This lets
   static type checkers catch misuse.
-* ``msg_id`` is a worker/master-local monotonic counter used for correlating
-  responses to requests (e.g. ``PoolOpResult.correlation_id == PoolOp.msg_id``).
+* ``msg_id`` is monotonic per side used for correlating responses to
+  requests (e.g. ``TaskBound.correlation_id == AssignTask.msg_id``).
   Fire-and-forget messages leave ``correlation_id`` null.
 * We intentionally avoid gRPC. FastAPI already pulls in ``starlette``'s
   WebSocket support and Pydantic handles schema; adding protobuf tooling
   would be overkill for an internal-VPC protocol.
+
+Ephemeral-VM model: an ``AssignTask`` is the only VM-lifecycle message
+master sends. The worker provisions a VM on receipt, binds the task, and
+replies with ``TaskBound`` (carrying the worker-assigned ``vm_id`` +
+``from_cache`` flag for telemetry). ``ReleaseLease`` tells the worker to
+destroy the VM for a given lease.
 """
 
 from __future__ import annotations
@@ -53,7 +59,12 @@ class CachedShape(BaseModel):
 
 
 class WorkerVMSummary(BaseModel):
-    """Snapshot of a single VM in the worker's pool, sent with heartbeats."""
+    """Snapshot of a single in-flight VM on a worker, sent with heartbeats.
+
+    Every VM is bound to a task in the ephemeral-VM model; `lease_id` is
+    therefore always populated. Kept as a flat list (not keyed) so the
+    wire format survives a worker restarting in the middle of the batch.
+    """
 
     vm_id: str
     image_key: str
@@ -61,33 +72,13 @@ class WorkerVMSummary(BaseModel):
     vcpus: int
     memory_gb: int
     disk_gb: int
-    state: str  # mirrors VMState enum values
-    warming: bool = False
     from_cache: bool = False
     lease_id: str | None = None
     # Public reach info — used by master to construct TaskAssignment.urls so
-    # clients can talk to the VM directly (Phase 4 ships without double-hop).
+    # clients can talk to the VM directly (no double-hop through master).
     public_host: str | None = None
     published_ports: dict[int, int] = Field(default_factory=dict)
     novnc_port: int | None = None
-
-
-class PoolOpArgs(BaseModel):
-    """Arguments for a single pool mutation op.
-
-    All fields are optional at the schema level; the valid subset depends on
-    ``kind``. Enforcement lives in the worker op executor, not here, so that
-    we can add new op kinds without cascading validator changes.
-    """
-
-    image_key: str | None = None
-    image_version: str | None = None  # None means "whatever worker has"
-    image_spec: dict[str, Any] | None = None  # serialized ImageSpec
-    vm_id: str | None = None
-    vcpus: int | None = None
-    memory_gb: int | None = None
-    disk_gb: int | None = None
-    count: int | None = None
 
 
 # ── Worker → Master payloads ────────────────────────────────────────────
@@ -107,20 +98,53 @@ class Heartbeat(BaseModel):
     cached_shapes: list[CachedShape] = Field(default_factory=list)
 
 
-class VMStateUpdate(BaseModel):
-    kind: Literal["vm_state_update"] = "vm_state_update"
-    vm_id: str
-    state: str
-    lease_id: str | None = None
+class TaskBound(BaseModel):
+    """Worker confirms a task has been provisioned + bound.
+
+    Reply to ``AssignTask``. ``vm_id`` is worker-assigned (master doesn't
+    track VMs). ``from_cache=True`` means the VM started via loadvm from
+    an already-warmed cache entry; False means cold-boot + savevm wrote a
+    new cache entry for the shape.
+    """
+
+    kind: Literal["task_bound"] = "task_bound"
+    task_id: str
+    lease_id: str
+    vm_id: str = ""
+    ok: bool = True
+    error: str | None = None
+    from_cache: bool = False
+    lease_endpoint: str | None = None
+    urls: dict[int, str] = Field(default_factory=dict)
+    novnc_url: str | None = None
+
+
+class TaskCompleted(BaseModel):
+    """Worker reports a lease has terminated (destroy_vm done).
+
+    Fires in two situations:
+
+    * Client-driven: client POSTs ``/v1/leases/{id}/complete`` to the
+      worker's lease API; the worker runs destroy_vm and sends this.
+    * Master-driven: ``ReleaseLease`` cancel path finishes the same way.
+
+    ``final_status`` is ``completed`` | ``failed`` | ``abandoned``.
+    """
+
+    kind: Literal["task_completed"] = "task_completed"
+    task_id: str
+    lease_id: str
+    final_status: str
     error: str | None = None
 
 
-class PoolOpResult(BaseModel):
-    kind: Literal["pool_op_result"] = "pool_op_result"
-    op_id: str
-    ok: bool
+class TaskReleased(BaseModel):
+    """Acknowledgment for a master-initiated ReleaseLease RPC."""
+
+    kind: Literal["task_released"] = "task_released"
+    lease_id: str
+    ok: bool = True
     error: str | None = None
-    produced_vm_id: str | None = None
 
 
 class TaskPhaseResult(BaseModel):
@@ -132,59 +156,13 @@ class TaskPhaseResult(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
-class TaskBound(BaseModel):
-    """Worker confirms a task is bound to a VM and ready to accept client traffic.
-
-    ``lease_endpoint`` is the worker's HTTP base URL (e.g.
-    ``http://35.193.3.23:8787``). Master copies it into ``TaskAssignment``
-    so clients POST lease-scoped operations directly at the worker.
-    """
-
-    kind: Literal["task_bound"] = "task_bound"
-    task_id: str
-    lease_id: str
-    vm_id: str
-    ok: bool = True
-    error: str | None = None
-    lease_endpoint: str | None = None
-    urls: dict[int, str] = Field(default_factory=dict)
-    novnc_url: str | None = None
-
-
-class TaskReleased(BaseModel):
-    """Worker acknowledges a master-initiated ReleaseLease (cancel path)."""
-
-    kind: Literal["task_released"] = "task_released"
-    lease_id: str
-    ok: bool = True
-    error: str | None = None
-
-
-class TaskCompleted(BaseModel):
-    """Worker reports a lease finished through the client HTTP complete path.
-
-    Sent asynchronously (not as an RPC reply) when the client calls
-    ``POST /v1/leases/{id}/complete`` on the worker and the VM finishes
-    reverting. Master's ClusterDispatcher consumes this to update the batch
-    state it's aggregating.
-    """
-
-    kind: Literal["task_completed"] = "task_completed"
-    task_id: str
-    lease_id: str
-    final_status: str  # completed | failed | abandoned
-    error: str | None = None
-
-
 WorkerToMaster = Annotated[
     Register
     | Heartbeat
-    | VMStateUpdate
-    | PoolOpResult
-    | TaskPhaseResult
     | TaskBound
+    | TaskCompleted
     | TaskReleased
-    | TaskCompleted,
+    | TaskPhaseResult,
     Field(discriminator="kind"),
 ]
 
@@ -193,16 +171,29 @@ WorkerToMaster = Annotated[
 
 
 class AssignTask(BaseModel):
+    """Master tells a worker to provision a VM and bind a task to it.
+
+    Worker:
+      1. Calls `runtime.provision_vm(image, vcpus, memory_gb, disk_gb)`.
+         Cache hit → loadvm ~30s; miss → cold boot ~5min + savevm.
+      2. Registers the task with the local scheduler (for lease HTTP APIs).
+      3. Replies with `TaskBound` carrying the worker-assigned vm_id +
+         from_cache flag + URL info for the client.
+
+    On worker-side failure (provision error, image unknown, unfit shape),
+    reply is `TaskBound(ok=False, error=...)` — master treats it as a
+    transient failure and may re-place the task on a different worker.
+    """
+
     kind: Literal["assign_task"] = "assign_task"
     task_id: str
     lease_id: str
-    vm_id: str
     image_key: str
     image_version: str | None = None
     task_path: str | None = None
-    vcpus: int | None = None
-    memory_gb: int | None = None
-    disk_gb: int | None = None
+    vcpus: int
+    memory_gb: int
+    disk_gb: int
     task_data: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -215,16 +206,11 @@ class StagePhase(BaseModel):
 
 
 class ReleaseLease(BaseModel):
+    """Master tells a worker to terminate a lease and destroy its VM."""
+
     kind: Literal["release_lease"] = "release_lease"
     lease_id: str
-    final_status: str  # completed | failed | abandoned
-
-
-class PoolOp(BaseModel):
-    kind: Literal["pool_op"] = "pool_op"
-    op_id: str
-    op: Literal["ADD_IMAGE", "REMOVE_IMAGE", "ADD_VM", "REMOVE_VM"]
-    args: PoolOpArgs
+    final_status: str
 
 
 class Shutdown(BaseModel):
@@ -233,7 +219,7 @@ class Shutdown(BaseModel):
 
 
 MasterToWorker = Annotated[
-    AssignTask | StagePhase | ReleaseLease | PoolOp | Shutdown,
+    AssignTask | StagePhase | ReleaseLease | Shutdown,
     Field(discriminator="kind"),
 ]
 
@@ -261,9 +247,6 @@ __all__ = [
     "Envelope",
     "Heartbeat",
     "MasterToWorker",
-    "PoolOp",
-    "PoolOpArgs",
-    "PoolOpResult",
     "Register",
     "ReleaseLease",
     "Shutdown",
@@ -272,7 +255,6 @@ __all__ = [
     "TaskCompleted",
     "TaskPhaseResult",
     "TaskReleased",
-    "VMStateUpdate",
     "WorkerCapacity",
     "WorkerToMaster",
     "WorkerVMSummary",

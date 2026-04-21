@@ -1,18 +1,15 @@
 """Master-side registry of connected workers.
 
-The registry is the single source of truth for "what's actually running on
-each worker right now" — populated from worker heartbeats and pool op results.
-It's paired with ``ClusterPoolSpec`` (desired state) by the reconciler loop.
+Populated from worker heartbeats and the `Register` frame. In the
+ephemeral-VM model every tracked VM is always lease-bound, so
+`vm_summaries` on each session represents in-flight tasks.
 
-Lifecycle:
-
-1. A worker connects over WebSocket and sends ``Register``.
-2. Master allocates a ``WorkerSession`` and stores it here, keyed by
-   ``worker_id``. Reconnects by the same worker_id replace the old session.
-3. Heartbeats update ``last_heartbeat`` + ``vm_summaries``. A reaper task
-   marks sessions OFFLINE after ``heartbeat_ttl_s`` without updates.
-4. The reconciler reads ``hosted_images`` / ``vm_summaries`` to compute diff
-   against desired state, and ``send(Envelope)`` to dispatch PoolOps.
+`WorkerSession` exposes derived capacity views (`free_vcpus`,
+`free_memory_gb`) computed from whatever ledger the dispatcher passes in.
+Master keeps its *own* capacity ledger (sum of assigned RUNNING tasks)
+because heartbeat data is always a few seconds stale — the dispatcher's
+table is the authoritative source at placement time. See
+`dispatcher._worker_free_capacity` for the canonical computation.
 """
 
 from __future__ import annotations
@@ -51,27 +48,28 @@ class WorkerSession:
     cached_shapes: list[CachedShape] = field(default_factory=list)
     online: bool = True
 
-    def free_vm_for(
-        self, image_key: str, vcpus: int, memory_gb: int, disk_gb: int,
-    ) -> WorkerVMSummary | None:
-        """Return a READY VM matching the shape request, if any.
+    def has_cached_shape(
+        self,
+        *,
+        image_key: str,
+        image_version: str,
+        vcpus: int,
+        memory_gb: int,
+        disk_gb: int,
+    ) -> bool:
+        """True if this worker's snapshot cache contains the exact shape.
 
-        Smallest-fit: prefer the tightest VM that still satisfies the request
-        so a batch of small tasks doesn't squat on oversized VMs.
+        A match means `provision_vm` on this worker resumes via loadvm
+        (~30s) instead of cold-boot (~5min).
         """
-        best: WorkerVMSummary | None = None
-        for vm in self.vm_summaries:
-            if vm.state != "ready":
-                continue
-            if vm.image_key != image_key:
-                continue
-            if vm.vcpus < vcpus or vm.memory_gb < memory_gb or vm.disk_gb < disk_gb:
-                continue
-            if best is None or (
-                vm.vcpus, vm.memory_gb, vm.disk_gb
-            ) < (best.vcpus, best.memory_gb, best.disk_gb):
-                best = vm
-        return best
+        return any(
+            cs.image_key == image_key
+            and cs.image_version == image_version
+            and cs.vcpus == vcpus
+            and cs.memory_gb == memory_gb
+            and cs.disk_gb == disk_gb
+            for cs in self.cached_shapes
+        )
 
 
 class WorkerRegistry:
@@ -96,7 +94,7 @@ class WorkerRegistry:
             existing = self._sessions.get(worker_id)
             if existing is not None and existing.online:
                 logger.warning(
-                    "Worker %s reconnecting, closing stale session", worker_id
+                    "Worker %s reconnecting, closing stale session", worker_id,
                 )
                 existing.online = False
             session = WorkerSession(
@@ -137,53 +135,9 @@ class WorkerRegistry:
             if session is None or not session.online:
                 return
             session.last_heartbeat = time.monotonic()
+            session.vm_summaries = vm_summaries
             if cached_shapes is not None:
                 session.cached_shapes = cached_shapes
-            # Preserve optimistic lease marks set by the dispatcher.
-            # The dispatcher marks a VM as "leased" (with a lease_id and
-            # _mark_time) before the worker has received the AssignTask
-            # message. If we blindly replace vm_summaries, the worker's
-            # stale "ready" overwrites the mark → double-booking.
-            #
-            # We ONLY restore leases that have a _mark_time (set by the
-            # dispatcher in _try_assign) and are recent (< 60s). Leases
-            # reported by the worker (from stale state after restart) do
-            # NOT get _mark_time, so they are never forcibly restored —
-            # the heartbeat data is authoritative for those.
-            now = time.monotonic()
-            dispatcher_marks: dict[str, tuple[str, float]] = {}
-            for vm in session.vm_summaries:
-                mark_time = getattr(vm, "_mark_time", 0.0)
-                if vm.lease_id and vm.state == "leased" and mark_time:
-                    dispatcher_marks[vm.vm_id] = (vm.lease_id, mark_time)
-            for vm in vm_summaries:
-                saved = dispatcher_marks.get(vm.vm_id)
-                if saved and vm.state == "ready" and not vm.lease_id:
-                    saved_lease, mark_time = saved
-                    if (now - mark_time) < 60:
-                        vm.state = "leased"
-                        vm.lease_id = saved_lease
-                        vm._mark_time = mark_time  # type: ignore[attr-defined]
-            session.vm_summaries = vm_summaries
-
-    async def apply_vm_state_update(
-        self,
-        worker_id: str,
-        *,
-        vm_id: str,
-        state: str,
-        lease_id: str | None,
-    ) -> None:
-        async with self._lock:
-            session = self._sessions.get(worker_id)
-            if session is None or not session.online:
-                return
-            for vm in session.vm_summaries:
-                if vm.vm_id == vm_id:
-                    vm.state = state
-                    vm.lease_id = lease_id
-                    return
-            # Unknown vm_id — the next heartbeat will reconcile.
 
     async def reap_stale(self) -> list[str]:
         """Mark workers whose heartbeat is older than TTL as offline."""
@@ -204,6 +158,11 @@ class WorkerRegistry:
         async with self._lock:
             return list(self._sessions.values())
 
+    async def online_snapshot(self) -> list[WorkerSession]:
+        """Online-only view. Used by dispatcher at placement time."""
+        async with self._lock:
+            return [s for s in self._sessions.values() if s.online]
+
     async def get(self, worker_id: str) -> WorkerSession | None:
         async with self._lock:
             return self._sessions.get(worker_id)
@@ -216,7 +175,7 @@ class WorkerRegistry:
         try:
             await session.ws.send_json(envelope.model_dump())
             return True
-        except Exception as exc:  # pragma: no cover - network edge
+        except Exception as exc:  # pragma: no cover — network edge
             logger.warning("Send to worker %s failed: %s", worker_id, exc)
             await self.mark_offline(worker_id)
             return False

@@ -44,21 +44,12 @@ batch_heartbeat_ttl_s: 7200
 heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 7200
 
 # The loopback ports docker publishes each VM on. Each worker uses its
 # own ports locally; the firewall rule `agenthle-allow-vm-ports` opens
 # this range VPC-internally to any tag=agenthle host.
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-
-# Worker's own static pool is EMPTY by design. Master pushes ADD_VM
-# ops via the PoolReconciler per ClusterPoolSpec. Never populate this
-# on a cluster worker — it will race with master-driven pool ops.
-vm_pool: []
-
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30
 
 mode: worker
 

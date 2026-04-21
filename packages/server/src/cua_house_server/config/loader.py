@@ -10,8 +10,6 @@ from pathlib import Path
 import httpx
 import yaml
 
-from cua_house_common.models import VMPoolEntry
-
 logger = logging.getLogger(__name__)
 
 
@@ -186,7 +184,6 @@ class HostRuntimeConfig:
     heartbeat_ttl_s: int
     ready_timeout_s: int
     readiness_poll_interval_s: float
-    idle_slot_ttl_s: int
     # Single host-loopback port pool used for ALL guest ports an image declares
     # in `published_ports`. Each VM consumes len(published_ports) ports from
     # this range. Pick a range large enough for max_vms × max_ports_per_image.
@@ -194,11 +191,6 @@ class HostRuntimeConfig:
     # Separate pool for the noVNC container service (one per VM, always 8006
     # inside the container).
     novnc_port_range: tuple[int, int]
-    # VM pool (snapshot-based local runtime)
-    vm_pool: list[VMPoolEntry] = field(default_factory=list)
-    snapshot_save_timeout_s: int = 300
-    snapshot_revert_timeout_s: int = 300
-    cua_ready_after_revert_timeout_s: int = 30
     # Cluster mode. "standalone" preserves single-node behavior; "master" runs
     # a control plane that coordinates workers; "worker" dials into a master.
     mode: str = "standalone"
@@ -269,15 +261,8 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         heartbeat_ttl_s=int(raw.get("heartbeat_ttl_s", 60)),
         ready_timeout_s=int(raw.get("ready_timeout_s", 900)),
         readiness_poll_interval_s=float(raw.get("readiness_poll_interval_s", 5)),
-        idle_slot_ttl_s=int(raw.get("idle_slot_ttl_s", 300)),
         published_port_range=tuple(raw.get("published_port_range", [16000, 16999])),
         novnc_port_range=tuple(raw.get("novnc_port_range", [18000, 18999])),
-        vm_pool=[
-            VMPoolEntry(**entry) for entry in raw.get("vm_pool", [])
-        ],
-        snapshot_save_timeout_s=int(raw.get("snapshot_save_timeout_s", 300)),
-        snapshot_revert_timeout_s=int(raw.get("snapshot_revert_timeout_s", 300)),
-        cua_ready_after_revert_timeout_s=int(raw.get("cua_ready_after_revert_timeout_s", 30)),
         mode=str(raw.get("mode", "standalone")),
         cluster=_load_cluster_config(raw.get("cluster")),
         vm_bind_address=str(raw.get("vm_bind_address", "127.0.0.1")),

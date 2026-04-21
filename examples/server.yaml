@@ -52,27 +52,8 @@ ready_timeout_s: 900
 # Polling interval for CUA readiness checks.
 readiness_poll_interval_s: 5
 
-# How long an idle slot is kept before cleanup (legacy mode).
-idle_slot_ttl_s: 300
-
 # Port ranges for published guest ports and noVNC (bind to 127.0.0.1).
 # Each VM uses len(image.published_ports) ports from published_port_range
 # and one port from novnc_port_range.
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-
-# VM pool: snapshot-based persistent VMs (local runtime only).
-# When configured, the server pre-boots these VMs at startup, takes QEMU
-# snapshots, and uses loadvm to revert between tasks.
-# If empty or omitted, falls back to per-task container lifecycle.
-vm_pool:
-  - image_key: cpu-free
-    count: 3
-    vcpus: 4
-    memory_gb: 16
-
-# Snapshot settings (only used with vm_pool)
-snapshot_name: clean-ready
-snapshot_save_timeout_s: 300
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30

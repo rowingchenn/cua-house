@@ -23,8 +23,7 @@ from cua_house_server.api.cluster_lease_proxy import build_cluster_lease_proxy_r
 from cua_house_server.api.cluster_task_routes import build_cluster_task_router
 from cua_house_server.cluster.dispatcher import ClusterDispatcher
 from cua_house_server.cluster.master_ws import build_cluster_router
-from cua_house_server.cluster.pool_spec import ClusterPoolSpec
-from cua_house_server.cluster.reconciler import PoolOpCoordinator, PoolReconciler
+from cua_house_server.cluster.coordinator import RpcCoordinator
 from cua_house_server.cluster.registry import WorkerRegistry
 from cua_house_server.cluster.worker_client import WorkerClusterClient
 
@@ -83,7 +82,7 @@ def create_app(
         runtimes["gcp"] = gcp_runtime
 
     # Default runtime for backwards compat with EnvScheduler's required arg.
-    # Master mode uses a throwaway runtime that never gets initialize_pool'd.
+    # Master mode uses a throwaway runtime that never provisions anything.
     default_runtime = runtimes.get("local") or DockerQemuRuntime(host_config, event_logger=event_logger)
     scheduler = EnvScheduler(
         runtime=default_runtime,
@@ -95,29 +94,18 @@ def create_app(
 
     # Cluster state (master) / client (worker). None in standalone mode.
     worker_registry: WorkerRegistry | None = None
-    pool_spec: ClusterPoolSpec | None = None
-    pool_coordinator: PoolOpCoordinator | None = None
-    pool_reconciler: PoolReconciler | None = None
+    rpc_coordinator: RpcCoordinator | None = None
     cluster_dispatcher: ClusterDispatcher | None = None
     worker_client: WorkerClusterClient | None = None
     if mode == "master":
         ttl = host_config.cluster.heartbeat_ttl_s if host_config.cluster else 30.0
         worker_registry = WorkerRegistry(heartbeat_ttl_s=ttl)
-        pool_spec_path = Path(host_config.runtime_root) / "cluster-pool-spec.json"
-        pool_spec = ClusterPoolSpec(persist_path=pool_spec_path)
-        pool_spec.load_from_disk()
-        pool_coordinator = PoolOpCoordinator()
+        rpc_coordinator = RpcCoordinator()
         cluster_dispatcher = ClusterDispatcher(
             host_config=host_config,
             images=images,
             registry=worker_registry,
-            coordinator=pool_coordinator,
-        )
-        pool_reconciler = PoolReconciler(
-            registry=worker_registry,
-            pool_spec=pool_spec,
-            coordinator=pool_coordinator,
-            on_worker_evicted=cluster_dispatcher.handle_worker_disconnect,
+            coordinator=rpc_coordinator,
         )
     elif mode == "worker":
         assert host_config.cluster is not None
@@ -138,9 +126,8 @@ def create_app(
                     f"worker mode: task_data_root {td} is not writable by current user. "
                     f"Check overlayfs upper layer permissions."
                 )
-        # Expose the image catalog to the worker client so PoolOp.ADD_IMAGE
-        # can look up specs by key. This is a transitional hook; once master
-        # ships ImageSpec payloads over the wire (Phase 5), this goes away.
+        # Expose the image catalog to the worker client so AssignTask can
+        # look up specs by key without passing ImageSpec on the wire.
         setattr(local_rt, "_cluster_catalog", images)
         # Construct the public lease endpoint URL. Prefer cluster config
         # override; fall back to host_external_ip + default worker port.
@@ -160,9 +147,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.scheduler = scheduler
         app.state.worker_registry = worker_registry
-        app.state.pool_spec = pool_spec
         app.state.cluster_dispatcher = cluster_dispatcher
-        # Support new env var with fallback to legacy
         app.state.auth_token = os.environ.get("CUA_HOUSE_TOKEN")
         app.state.proxy_client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=60.0),
@@ -174,13 +159,9 @@ def create_app(
             await worker_client.start()
         if cluster_dispatcher is not None:
             await cluster_dispatcher.start()
-        if pool_reconciler is not None:
-            await pool_reconciler.start()
         try:
             yield
         finally:
-            if pool_reconciler is not None:
-                await pool_reconciler.stop()
             if cluster_dispatcher is not None:
                 await cluster_dispatcher.shutdown()
             if worker_client is not None:
@@ -192,7 +173,6 @@ def create_app(
     app = FastAPI(title="cua-house-server", version="0.1.0", lifespan=lifespan)
     app.state.scheduler = scheduler
     app.state.worker_registry = worker_registry
-    app.state.pool_spec = pool_spec
     app.state.cluster_dispatcher = cluster_dispatcher
     app.state.auth_token = os.environ.get("CUA_HOUSE_TOKEN")
 
@@ -213,24 +193,22 @@ def create_app(
 
     # Cluster control plane (master only).
     if mode == "master":
-        assert worker_registry is not None and pool_spec is not None
+        assert worker_registry is not None and cluster_dispatcher is not None
         cluster_token = (
             host_config.cluster.join_token if host_config.cluster else None
         )
         app.include_router(
             build_cluster_router(
                 registry=worker_registry,
-                coordinator=pool_coordinator,
+                coordinator=rpc_coordinator,
                 dispatcher=cluster_dispatcher,
                 expected_token=cluster_token,
                 path=(host_config.cluster.master_bind_path if host_config.cluster else "/v1/cluster/ws"),
             )
         )
-        assert cluster_dispatcher is not None
         app.include_router(
             build_cluster_api_router(
                 registry=worker_registry,
-                pool_spec=pool_spec,
                 dispatcher=cluster_dispatcher,
             )
         )

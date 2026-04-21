@@ -7,25 +7,11 @@ runtime_root: /mnt/xfs/runtime
 snapshot_cache_dir: /mnt/xfs/snapshot-cache
 task_data_root: /mnt/agenthle-task-data
 docker_image: trycua/cua-qemu-windows:latest
-host_reserved_cpu_cores: 2
+host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
 batch_heartbeat_ttl_s: 7200
 heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 7200
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-
-vm_pool:
-  - snapshot_name: cpu-free
-    count: 3
-    cpu_cores: 4
-    memory_gb: 8
-  - snapshot_name: cpu-free-ubuntu
-    count: 1
-    cpu_cores: 4
-    memory_gb: 8
-
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30

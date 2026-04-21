@@ -11,21 +11,5 @@ batch_heartbeat_ttl_s: 7200
 heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 7200
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-
-# VM pool: persistent VMs started from pre-baked qcow2 templates.
-# At startup the server copies the template qcow2 and starts each VM via
-# QEMU -loadvm <snapshot_name> (ready in ~30s, no cold boot).
-# snapshot_name must match both the VMPoolEntry entry AND the savevm name
-# baked into the template qcow2. It is also used as the key into images.yaml.
-vm_pool:
-  - snapshot_name: cpu-free
-    count: 4
-    vcpus: 4
-    memory_gb: 8
-
-# Snapshot revert settings (loadvm between tasks)
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30

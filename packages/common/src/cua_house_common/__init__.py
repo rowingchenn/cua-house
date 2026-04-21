@@ -16,7 +16,6 @@ from cua_house_common.models import (
     TaskRequirement,
     TaskState,
     TaskStatus,
-    VMPoolEntry,
     utcnow,
 )
 
@@ -34,6 +33,5 @@ __all__ = [
     "TaskRequirement",
     "TaskState",
     "TaskStatus",
-    "VMPoolEntry",
     "utcnow",
 ]

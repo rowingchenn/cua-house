@@ -2,11 +2,11 @@
 
 Mounted by the app factory at ``ClusterConfig.master_bind_path`` when the
 process is running in master mode. Handles the single long-lived WS per
-worker: auth → Register → pump Heartbeat/VMStateUpdate/PoolOpResult/etc.
+worker: auth → Register → pump Heartbeat / TaskBound / TaskCompleted /
+TaskReleased.
 
-Message routing lives in this module; scheduling decisions (i.e. which
-worker to target for a given task) live in the Phase 2e reconciler and the
-scheduler's ``WorkerSlotProvider``.
+Message routing lives in this module; placement decisions (i.e. which
+worker to target for a given task) live in ``cluster/dispatcher.py``.
 """
 
 from __future__ import annotations
@@ -19,16 +19,14 @@ from pydantic import TypeAdapter, ValidationError
 from cua_house_server.cluster.protocol import (
     Envelope,
     Heartbeat,
-    PoolOpResult,
     Register,
     TaskBound,
     TaskCompleted,
     TaskPhaseResult,
     TaskReleased,
-    VMStateUpdate,
     WorkerToMaster,
 )
-from cua_house_server.cluster.reconciler import PoolOpCoordinator
+from cua_house_server.cluster.coordinator import RpcCoordinator
 from cua_house_server.cluster.registry import WorkerRegistry
 
 if False:  # TYPE_CHECKING
@@ -42,7 +40,7 @@ _WorkerToMasterAdapter = TypeAdapter(WorkerToMaster)
 def build_cluster_router(
     *,
     registry: WorkerRegistry,
-    coordinator: PoolOpCoordinator | None = None,
+    coordinator: RpcCoordinator | None = None,
     dispatcher: "ClusterDispatcher | None" = None,
     expected_token: str | None,
     path: str = "/v1/cluster/ws",
@@ -119,7 +117,7 @@ def _parse_worker_message(raw: dict) -> WorkerToMaster:
 
 async def _dispatch(
     registry: WorkerRegistry,
-    coordinator: PoolOpCoordinator | None,
+    coordinator: RpcCoordinator | None,
     dispatcher: "ClusterDispatcher | None",
     worker_id: str,
     envelope: Envelope,
@@ -131,23 +129,10 @@ async def _dispatch(
             vm_summaries=payload.vm_summaries,
             cached_shapes=payload.cached_shapes,
         )
-    elif isinstance(payload, VMStateUpdate):
-        await registry.apply_vm_state_update(
-            worker_id,
-            vm_id=payload.vm_id,
-            state=payload.state,
-            lease_id=payload.lease_id,
-        )
-    elif isinstance(payload, (PoolOpResult, TaskBound, TaskReleased)):
-        # Request/response RPCs correlate via envelope.correlation_id so a
-        # single coordinator services pool ops AND assign-task uniformly.
+    elif isinstance(payload, (TaskBound, TaskReleased)):
+        # Request/response RPC replies correlate via envelope.correlation_id.
         if coordinator is not None and envelope.correlation_id is not None:
             await coordinator.resolve(envelope.correlation_id, payload)
-        elif isinstance(payload, PoolOpResult):
-            logger.info(
-                "Unrouted PoolOp %s from %s: ok=%s",
-                payload.op_id, worker_id, payload.ok,
-            )
     elif isinstance(payload, TaskCompleted):
         if dispatcher is not None:
             await dispatcher.handle_task_completed(worker_id, payload)

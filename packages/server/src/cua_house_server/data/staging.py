@@ -87,7 +87,7 @@ class TaskDataManager:
         task_data: TaskRequirement.TaskDataRequest | None,
         phase: PhaseName,
         container_name: str | None = None,
-        vm_pool: bool = False,
+        use_symlink_inject: bool = False,
         os_family: str | None = None,
     ) -> StageResult:
         if task_data is None or not task_data.requires_task_data:
@@ -101,12 +101,12 @@ class TaskDataManager:
             phase=phase,
             task_category=task_data.task_category,
             task_tag=task_data.task_tag,
-            vm_pool=vm_pool,
+            use_symlink_inject=use_symlink_inject,
         )
 
         try:
-            if vm_pool:
-                result = await self._stage_vm_pool(
+            if use_symlink_inject:
+                result = await self._stage_symlink_inject(
                     cua_url=cua_url,
                     task_data=task_data,
                     phase=phase,
@@ -153,7 +153,7 @@ class TaskDataManager:
     # Samba share root inside dockur containers (serves \\host.lan\Data).
     _SMB_SHARE_DIR = "/tmp/smb"
 
-    async def _stage_vm_pool(
+    async def _stage_symlink_inject(
         self,
         *,
         cua_url: str,
@@ -172,9 +172,9 @@ class TaskDataManager:
         do not exist from the guest's perspective.
         """
         if not container_name:
-            raise ValueError("container_name is required for vm_pool staging")
+            raise ValueError("container_name is required for use_symlink_inject staging")
         if not task_data.source_relpath:
-            raise ValueError("source_relpath is required for vm_pool staging")
+            raise ValueError("source_relpath is required for use_symlink_inject staging")
 
         rel = task_data.source_relpath
         smb = self._SMB_SHARE_DIR
