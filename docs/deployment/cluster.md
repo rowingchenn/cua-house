@@ -104,18 +104,17 @@ batch_heartbeat_ttl_s: 3600
 heartbeat_ttl_s: 3600
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 7200
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-vm_pool: []
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30
 mode: master
 cluster:
   master_bind_path: /v1/cluster/ws
   heartbeat_interval_s: 5
   heartbeat_ttl_s: 30
 ```
+
+Note: master mode does not require `snapshot_cache_dir` — master never
+provisions VMs.
 
 ### Worker config (`kvm02-worker.yaml`)
 
@@ -124,6 +123,7 @@ host_id: kvm-02-worker
 host_external_ip: <worker internal IP, e.g. 10.128.0.14>
 public_base_host: <same>
 runtime_root: /mnt/xfs/runtime-cluster    # separate from standalone runtime_root
+snapshot_cache_dir: /mnt/xfs/snapshot-cache   # REQUIRED: persistent XFS for reflink
 task_data_root: /mnt/agenthle-task-data   # the OverlayFS merged view
 docker_image: trycua/cua-qemu-windows:latest
 host_reserved_vcpus: 2
@@ -132,12 +132,8 @@ batch_heartbeat_ttl_s: 7200
 heartbeat_ttl_s: 7200
 ready_timeout_s: 900
 readiness_poll_interval_s: 5
-idle_slot_ttl_s: 7200
 published_port_range: [16000, 16999]
 novnc_port_range: [18000, 18999]
-vm_pool: []                                # EMPTY — master pushes dynamically
-snapshot_revert_timeout_s: 300
-cua_ready_after_revert_timeout_s: 30
 mode: worker
 vm_bind_address: 0.0.0.0                   # publish VM ports to all IFs
 cluster:
@@ -152,8 +148,9 @@ cluster:
 ### Images catalog
 
 Shared between master and workers. Master uses it to validate submit
-requests; workers use it to find local qcow2 template paths and GCS URIs
-when master sends `PoolOp.ADD_IMAGE`.
+requests and resolve image defaults; workers use it to find local qcow2
+template paths and GCS URIs at startup prewarm time and during
+`AssignTask` handling.
 
 ```yaml
 images:
@@ -229,30 +226,22 @@ In either path, verify the worker registered with master:
 curl -sS http://<master>:8787/v1/cluster/workers | python3 -m json.tool
 ```
 
-## Driving the pool
+## No pool to drive
 
-The reconciler only creates/destroys VMs to match the **desired state**
-you set via `PUT /v1/cluster/pool`. There is no auto-scaling — operator
-is in control.
+There is no desired pool state to configure in the ephemeral-VM model
+— master provisions a fresh VM per `AssignTask` at task-submission
+time. Operators don't call any mutation endpoint at all; just submit
+batches and master picks a worker with:
 
-```bash
-curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
-  -H 'Content-Type: application/json' \
-  -d '{"assignments":[
-    {"worker_id":"kvm02","image_key":"cpu-free","count":2,"vcpus":4,"memory_gb":8,"disk_gb":64},
-    {"worker_id":"kvm03","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8,"disk_gb":64}
-  ]}'
-```
+1. capacity (free_vcpus ≥ task.vcpus, free_memory_gb ≥ task.memory_gb;
+   master-authoritative ledger, not heartbeat),
+2. cache affinity (worker with the exact `(image, version, shape)` in
+   its snapshot cache wins),
+3. least-loaded among ties.
 
-Within one reconciler tick (default 5s) master sends `ADD_IMAGE` +
-`ADD_VM` pool ops over WS. If the worker already has a snapshot-cache
-entry for this shape (image + version + vcpus + memory + disk), it
-reflinks and boots via `-loadvm` in seconds. On a cache miss (first-ever
-shape on this worker), it cold-boots from the base template (~4-5 min),
-saves the snapshot to cache, and reports `state: ready`.
-
-Desired state is **persisted to `runtime_root/cluster-pool-spec.json`**,
-so master restarts preserve pool sizing.
+First-ever same-shape task on a worker cold-boots (~4-5 min) + writes
+the cache. Every subsequent same-shape task on that worker reflinks the
+cached qcow2 and resumes via `-loadvm` (~30 s).
 
 ## Submitting a batch
 
@@ -333,26 +322,31 @@ environment where `uv run` was launched.
 
 ### Worker crashes or disconnects
 
-Master's `PoolReconciler` tick (every 5s) calls
-`registry.reap_stale()` — any worker whose heartbeat is older than the
-TTL is marked offline and `ClusterDispatcher.handle_worker_disconnect`
-immediately fails every task with a lease on that worker
-(`state=failed`, `error="worker <id> disconnected"`). A WebSocket close
-takes effect instantly via the same hook wired from `master_ws`.
+WebSocket close takes effect instantly via the `master_ws` finally
+hook: `registry.mark_offline()` + `dispatcher.handle_worker_disconnect()`.
+Heartbeat timeout is the second safety net — a periodic reaper on the
+registry catches workers whose heartbeats stopped without a clean close.
 
-Workers reconnect automatically with exponential backoff. When a worker
-rejoins with the same `worker_id`, the reconciler re-converges its pool
-— ADD_IMAGE + ADD_VM as if from a blank slate.
+On disconnect, `handle_worker_disconnect` requeues every in-flight task
+bound to that worker (`state=queued`, `metadata.retry_count++`) and
+fires `reevaluate_queued` to place them on other online workers. Tasks
+that have hit `retry_count > 2` fail permanently with `error="worker
+<id> disconnected; exceeded retry budget"`.
+
+Workers reconnect automatically with exponential backoff. No pool
+convergence is needed on rejoin — the new ephemeral-VM model never
+pre-provisions anything; the worker just starts handling new
+`AssignTask` messages as they arrive.
 
 ### Master crashes
 
 Workers keep running and continue serving any in-flight leases via
 their HTTP API. New batches can't be submitted until master is back.
-On restart, master re-reads `cluster-pool-spec.json` and waits for
-workers to reconnect; the reconciler eventually re-matches desired
-state. In-flight leases are **not** recovered by master — if a lease
-existed before the crash and completes after, the client's
-`TaskCompleted` message is dropped (master has no record of the task).
+On restart, master starts with empty task state and waits for workers
+to reconnect. In-flight leases from before the crash are lost from
+master's view — if such a lease completes after restart, the worker's
+`TaskCompleted` message is dropped (master has no record). Clients
+should treat master restart as a batch-level failure.
 
 ### GPU task with no GPU worker
 

@@ -26,10 +26,6 @@ Shared models and utilities used by both `cua-house-server` and `cua-house-clien
 - `BatchHeartbeatResponse` -- batch heartbeat acknowledgment
 - `LeaseStageResponse` -- result of task data staging (file count, bytes staged)
 
-### Config models
-
-- `VMPoolEntry` -- configuration for a group of identical VMs in the snapshot pool
-
 ### Utilities
 
 - `JsonlEventLogger` -- thread-safe append-only JSONL event logger

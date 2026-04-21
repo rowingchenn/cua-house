@@ -10,11 +10,13 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 > - `mode: worker` in `server.yaml` and a `cluster:` section pointing
 >   at the master
 > - `vm_bind_address: 0.0.0.0` so VM ports are reachable across the VPC
-> - `vm_pool: []` — the worker's pool is pushed dynamically by master
->   at runtime via PoolOp messages
+> - `snapshot_cache_dir` set to a persistent XFS path (cache survives
+>   worker restarts; first task per shape cold-boots and caches)
 >
-> Everything below (filesystem layout, OverlayFS task-data sharing,
-> images.yaml, docker image) applies unchanged to workers.
+> In cluster mode the worker provisions a fresh VM per master-dispatched
+> `AssignTask` and destroys it on task completion — there is no static
+> pool to configure. Everything below (filesystem layout, OverlayFS
+> task-data sharing, images.yaml, docker image) applies unchanged.
 
 ## Host requirements
 
@@ -80,9 +82,9 @@ Edit `server.yaml`:
 
 - `host_id`: unique identifier for this host
 - `host_external_ip`: set to `auto` on GCE (uses metadata API) or a static IP
-- `runtime_root`: path for runtime state
+- `runtime_root`: path for runtime state (slot directories)
+- `snapshot_cache_dir`: **required** for standalone + worker. Persistent XFS path where per-shape cached qcow2s live. See [vm-image-maintenance.md](../operations/vm-image-maintenance.md) for the purge-on-version-bump SOP.
 - `task_data_root`: path to task data directory (or null if not used)
-- `vm_pool`: list of VM pool entries to pre-boot at startup
 
 Edit `images.yaml`:
 

@@ -279,24 +279,16 @@ while [ "$(curl -sS http://<master>:8787/v1/tasks/kvm04-smoke | jq -r .state)" !
 When you no longer need a worker:
 
 ```bash
-# 1. Remove it from master's desired pool so reconciler stops
-#    sending PoolOps. Master will NOT automatically destroy the
-#    VMs that exist — do that after step 2.
-curl -sS http://<master>:8787/v1/cluster/pool > /tmp/pool.json
-python3 -c "
-import json
-d = json.load(open('/tmp/pool.json'))
-d['assignments'] = [a for a in d['assignments'] if a['worker_id'] != 'kvm04']
-print(json.dumps(d))" > /tmp/pool-new.json
-curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
-    -H 'Content-Type: application/json' -d @/tmp/pool-new.json
+# 1. Wait for any in-flight tasks on this worker to finish (or cancel
+#    the owning batches via POST /v1/batches/{id}/cancel). There is no
+#    pool spec to edit — master stops assigning to this worker as soon
+#    as the SSH disconnect or systemd stop drops its WS connection.
 
-# 2. Stop the worker (systemd) — revert any active leases first via
-#    master's batch cancel endpoints, or wait for them to finish.
+# 2. Stop the worker.
 gcloud compute ssh agenthle-nested-kvm-04 \
     --command='sudo systemctl stop cua-house-worker'
 
-# 3. Delete the GCE instance. --delete-disks=boot,xfs keeps the
+# 3. Delete the GCE instance. --delete-disks=boot,data keeps the
 #    shared task-data disk intact (it's multi-attached).
 gcloud compute instances delete agenthle-nested-kvm-04 \
     --zone=us-central1-a \

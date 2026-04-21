@@ -26,28 +26,35 @@ Key points:
 
 ## Scheduler internals
 
-### State machine
+### State
 
-The scheduler (`scheduler/core.py`) manages three state machines in memory:
+The scheduler (`scheduler/core.py`) holds four tables keyed by task_id:
 
-1. **Tasks** (`_tasks: dict[str, TaskStatus]`): tracks every submitted task through its lifecycle.
-2. **Slots** (`_slots: dict[str, SlotRecord]`): per-task container slots (legacy mode).
-3. **VMs** (`_vms: dict[str, VMRecord]`): persistent snapshot-pool VMs (when `vm_pool` is configured).
+1. **Tasks** (`_tasks: dict[str, TaskStatus]`): every submitted task through its lifecycle.
+2. **Local VM handles** (`_local_handles: dict[str, VMHandle]`): one entry per running task using `DockerQemuRuntime`.
+3. **GCP slot handles** (`_gcp_handles: dict[str, GCPSlotHandle]`): one entry per running task using `GCPVMRuntime`.
+4. **Lease records** (`_leases: dict[str, LeaseRecord]`): heartbeat + TTL tracking.
 
-### Dispatch loop
+No VM state machine, no pool — every table entry is ephemeral and dies with its task.
 
-`_dispatch_loop` runs as an asyncio background task:
+### Dispatch loop (standalone mode)
 
-1. Picks the next queued task (ordered by submission time).
-2. If VM pool is active: finds a READY VM matching the image key, assigns it immediately via `loadvm` revert.
-3. If no VM pool or no matching VM: allocates ports, creates a slot, and spawns `_start_slot_task` as a background asyncio task.
-4. Tasks that exceed host capacity are immediately marked FAILED.
+`_dispatch_loop` wakes when there are QUEUED tasks:
+
+1. Pick oldest QUEUED task.
+2. Choose local or GCP runtime based on the image catalog.
+3. Call `runtime.provision_vm(...)` → `VMHandle`. Cache hit → loadvm ~30s; miss → cold-boot + savevm + cache write ~5min.
+4. Create a lease, bind the handle, set `task.assignment`, mark READY.
+5. On failure: mark task FAILED with the provision error.
+
+In cluster worker mode, this loop is inactive — master's `AssignTask`
+drives `bind_provisioned_task` instead.
 
 ### Lease reaper
 
 `_lease_reaper_task` runs periodically:
 - Checks `LeaseRecord.expires_at` against `utcnow()`.
-- Expired leases trigger `_release_after_reset` (destroy container or revert VM).
+- Expired leases trigger `_finalize_task` (calls `destroy_vm`, clears handle, marks task FAILED).
 - Starting tasks (no lease yet) are not reaped.
 
 ### Batch heartbeat

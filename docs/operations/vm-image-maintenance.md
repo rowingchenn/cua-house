@@ -15,7 +15,7 @@ How to update the Windows VM images used by cua-house. There are two image types
 | `waa` | `waa-20260408.qcow2` | `gs://agenthle-images/templates/waa/waa-20260408.qcow2` | 2026-04-10 | **Active** (kvm-02) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QEMU monitor `savevm` on kvm-02. |
 | `cpu-license` | `cpu-license-20260405.qcow2` | *(not uploaded)* | 2026-04-05 | Not yet updated with bridge changes. |
 
-> **Source of truth for local templates is GCS**, not any particular KVM host. The cua-house-server's `_ensure_local_templates()` auto-pulls from the `gcs_uri` in `images.yaml` on first startup, so any new node gets the current baked version for free. After **any** local re-bake, you MUST upload the new qcow2 back to GCS (`gsutil cp ...`) or future nodes will pull a stale version and either fail `-loadvm` or hit already-fixed guest-side bugs.
+> **Source of truth for local templates is GCS**, not any particular KVM host. The cua-house-server's `prewarm_templates()` auto-pulls from the `gcs_uri` in `images.yaml` at worker startup, so any new node gets the current baked version for free. After **any** local re-bake, you MUST upload the new qcow2 back to GCS (`gsutil cp ...`) or future nodes will pull a stale version and either fail `-loadvm` or hit already-fixed guest-side bugs.
 >
 > On kvm-02 the images live on `/mnt/xfs/images/{image_key}/` (XFS+reflink) and are accessed through the `/home/weichenzhang/agenthle-env-images → /mnt/xfs/images` symlink so the same `template_qcow2_path` in `images.yaml` resolves on both legacy (kvm0) and current (kvm-02) hosts without per-host config drift.
 

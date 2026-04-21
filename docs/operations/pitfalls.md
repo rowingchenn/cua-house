@@ -121,7 +121,7 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 **Symptom**: New KVM node pool init fails with `Snapshot 'X' does not exist in one or more devices`, OR Linux task data staging fails with `mount.cifs: command not found` even though the fix was already added to the local template. Inspecting the qcow2 on the broken node shows an older bake timestamp than the known-good node.
 
-**Root cause**: `_ensure_local_templates()` pulls the template from the `gcs_uri` configured in `images.yaml`. When someone re-bakes a template locally (e.g. to fix a guest-side bug like `cifs-utils`) and forgets to `gsutil cp` the result back to GCS, the local disk on one host diverges from GCS. Future nodes pull the stale GCS version. Hit in practice:
+**Root cause**: `prewarm_templates()` at worker startup pulls the template from the `gcs_uri` configured in `images.yaml`. When someone re-bakes a template locally (e.g. to fix a guest-side bug like `cifs-utils`) and forgets to `gsutil cp` the result back to GCS, the local disk on one host diverges from GCS. Future nodes pull the stale GCS version. Hit in practice:
 
 - `waa-20260408.qcow2`: uploaded to GCS as raw GCP export, baked locally on kvm-02 only. Fixed in the initial `waa` deployment (commit 07dfaf6).
 - `cpu-free-ubuntu-20260408.qcow2`: first bake on 2026-04-08 19:33 (no cifs-utils) went to GCS. Re-bake on 2026-04-09 05:50 (with cifs-utils) stayed on kvm-02 only for ~18 hours.
@@ -180,11 +180,22 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 ### 16. OverlayFS upper layer persists across VM reverts
 
-**Symptom**: Re-running the same task shows stale files in `output/` from a previous run, even though the VM was reverted to a clean snapshot.
+**Symptom**: Re-running the same task (re-submitting via the client, or
+retrying through `retry_count` on disconnect) shows stale files in
+`output/` from a previous run.
 
-**Root cause**: VM revert only resets guest state. Output files are written through Samba/CIFS to the host's OverlayFS upper layer, which persists on disk. A re-run of the same task sees the old upper-layer content.
+**Root cause**: Output files are written from the guest through Samba
+to `/data-store/{rel}/output` on the worker host. `/data-store` is the
+read-only mount of the shared task-data disk; the writable `output/`
+lives in the OverlayFS upper layer, which persists across VM
+destroy/provision. A re-run of the same task sees the old upper-layer
+content.
 
-**Fix**: In `_stage_vm_pool()` runtime phase, `rm -rf` the output dir before the task starts. Implemented via `_reset_remote_dir()` (Windows) and `_reset_remote_dir_linux()` (Linux) in `staging.py`.
+**Fix**: Task staging recreates the task's directory structure and
+wipes `output/` on each runtime phase (`_stage_symlink_inject` in
+`packages/server/src/cua_house_server/data/staging.py`). If a new task
+does NOT go through that staging phase (e.g. manual debug), purge
+`{task_data_root_upper}/{rel}/output/` yourself.
 
 ---
 
@@ -262,19 +273,19 @@ Remaining improvements to consider:
 
 **Symptom**: After `master.log` shows a new `INFO: Uvicorn running...`, the workers' `worker.log` keeps printing `Worker WS disconnected: received 1012 (service restart)` and `Connect call failed (<master ip>, 8787)` for ~30–60s before recovering. `/v1/cluster/workers` on master returns `[]` during the window.
 
-**Behavior**: This is normal exponential backoff. Two back-to-back master restarts compound the backoff. No action needed — each worker's reconnect supervisor waits `min(reconnect_min_backoff_s * 2^n + jitter, reconnect_max_backoff_s)` between attempts. `ClusterPoolSpec.load_from_disk` restores desired state so reconciler re-converges the pool after reconnect without operator intervention.
+**Behavior**: This is normal exponential backoff. Two back-to-back master restarts compound the backoff. No action needed — each worker's reconnect supervisor waits `min(reconnect_min_backoff_s * 2^n + jitter, reconnect_max_backoff_s)` between attempts. Master has no persistent pool state to restore (ephemeral-VM model); workers just start accepting new `AssignTask` messages as they arrive.
 
-### 24. Task stuck at state=ready on master while worker is reverting
+### 24. Task stuck at state=ready on master while worker is destroying the VM
 
-**Symptom**: Client successfully called `POST /v1/leases/{id}/complete` through master's lease proxy (HTTP 200). Master's `/v1/tasks/{id}` still returns `state: ready` for 100+ seconds.
+**Symptom**: Client successfully called `POST /v1/leases/{id}/complete` through master's lease proxy (HTTP 200). Master's `/v1/tasks/{id}` still returns `state: ready` for several seconds.
 
 **Root cause**: This is expected. Master's task view is a projection that updates in three places only:
 
 1. `ClusterDispatcher.submit_batch` (QUEUED)
-2. `_try_assign` after `TaskBound` arrives (READY)
+2. `_try_place` after `TaskBound` arrives (READY)
 3. `handle_task_completed` after the worker emits `TaskCompleted` over WS
 
-Between READY and the worker's revert finishing (typically 90–120s for cpu-free images via QMP loadvm), master has no reason to touch the state. The worker's local scheduler owns the LEASED / RESETTING transitions during that window.
+Between READY and the worker finishing `destroy_vm` (typically a few seconds: `docker rm -f` + `shutil.rmtree` of the slot), master has no reason to touch the state. The worker's local scheduler owns the LEASED / RESETTING transitions during that window.
 
 **If you need authoritative real-time status**: poll the worker's `GET /v1/leases/{id}/...` (not implemented but trivial to add), or read the worker's `events.jsonl` directly. For normal operation wait for the `TaskCompleted → state=completed` transition — it arrives within ~1s of revert finishing on the worker.
 

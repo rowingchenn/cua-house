@@ -36,9 +36,7 @@ cua-house/
         admin/               # image bake workflow
         _internal/           # port pool
       tests/
-        conftest.py
-        test_scheduler.py    # unit tests with FakeRuntime
-        test_vm_pool_smoke.py # KVM host smoke tests
+        cluster/             # protocol, registry, register-frame unit tests
   bridges/                   # non-Python bridge assets
     cua_mcp_server/          # Node.js MCP server for Claude/Codex
     openclaw_plugin/         # OpenClaw CUA plugin

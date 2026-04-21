@@ -99,7 +99,7 @@ The test cold-boots the qcow2 without any snapshot tag and verifies the CUA serv
     --qcow2 /home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 ```
 
-This uploads to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2`. This step is **required** -- new workers pull templates from GCS on first startup via `_ensure_local_templates()`. Skipping this means new workers get a stale image.
+This uploads to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2`. This step is **required** -- workers prewarm templates from GCS at startup (`prewarm_templates()`). Skipping this means new workers get a stale image.
 
 ## Step 5: Sync task data (if changed)
 

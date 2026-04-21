@@ -28,10 +28,12 @@ Default configs are in `packages/server/src/cua_house_server/config/defaults/`. 
 ```bash
 uv run pytest                        # all tests
 uv run pytest packages/server/       # server tests only
-uv run pytest -k test_scheduler      # specific test pattern
+uv run pytest -k test_protocol       # specific test pattern
 ```
 
-Smoke tests in `test_vm_pool_smoke.py` require `/dev/kvm` and Docker. They are skipped automatically in environments without KVM.
+Full unit suite runs offline (no Docker / KVM / network). End-to-end
+validation against a live master + worker is documented in
+[`docs/development/testing.md`](docs/development/testing.md).
 
 ## Code style
 

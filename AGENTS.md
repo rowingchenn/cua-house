@@ -61,10 +61,8 @@ uv run cua-house-server              # start server on port 8787
 
 ## Testing
 
-- Unit tests use `FakeRuntime` (see `packages/server/tests/test_scheduler.py`).
-- `FakeRuntime` implements the `RuntimeBackend` protocol without Docker or QEMU.
-- API integration tests use `fastapi.testclient.TestClient`.
-- Smoke tests (`test_vm_pool_smoke.py`) require a real KVM host -- not run in CI.
+- Unit suite (`packages/server/tests/`) covers protocol roundtrips, `WorkerRegistry` behavior, and `WorkerClusterClient.build_register_frame`. No Docker / KVM / network dependency; runs in CI.
+- End-to-end validation against a live master + worker lives in [`docs/development/testing.md`](docs/development/testing.md) — admission check, cache-hit / cache-miss provisioning, capacity ledger, worker-disconnect requeue.
 - Always run `uv run pytest` before proposing commits.
 
 ## Style

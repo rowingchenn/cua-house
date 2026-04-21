@@ -13,12 +13,12 @@ src/cua_house_server/
     auth.py           Bearer token authentication
     proxy.py          Reverse proxy for CUA and noVNC (HTTP + WebSocket)
   scheduler/
-    core.py           EnvScheduler: state machine, dispatch loop, lease reaper
-    models.py         SlotState, VMState, SlotRecord, VMRecord, LeaseRecord
+    core.py           EnvScheduler: task/batch/lease lifecycle; ephemeral VM handle per running task
+    models.py         LeaseRecord
   runtimes/
-    base.py           RuntimeBackend protocol (interface for all backends)
-    qemu.py           DockerQemuRuntime: Docker+QEMU local VMs, VM pool
-    gcp.py            GCPVMRuntime: GCP Compute Engine VMs
+    qemu.py           DockerQemuRuntime: provision_vm / destroy_vm / list_cached_shapes over nested Docker+QEMU
+    gcp.py            GCPVMRuntime: same surface over GCP Compute Engine VMs
+    snapshot_cache.py Per-worker on-disk cache of savevm'd qcow2s keyed by (image, version, shape)
   qmp/
     client.py         QMP client (savevm/loadvm via docker exec + nc)
   data/
@@ -49,8 +49,8 @@ Key fields:
 | `public_base_host` | Base hostname for lease routing or `auto` ({ip}.sslip.io) |
 | `runtime_root` | Directory for overlays, logs, events |
 | `task_data_root` | Directory with task input/reference data |
+| `snapshot_cache_dir` | Persistent path for per-shape qcow2 cache (required for worker/standalone) |
 | `docker_image` | Docker image for QEMU containers |
-| `vm_pool` | List of `{image_key, count, vcpus, memory_gb}` for snapshot pool |
 | `heartbeat_ttl_s` | Lease heartbeat timeout (default: 60s) |
 | `batch_heartbeat_ttl_s` | Batch heartbeat timeout (default: 30s) |
 | `ready_timeout_s` | Max wait for VM boot (default: 900s) |
