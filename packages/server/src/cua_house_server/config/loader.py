@@ -266,26 +266,29 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         mode=str(raw.get("mode", "standalone")),
         cluster=_load_cluster_config(raw.get("cluster")),
         vm_bind_address=str(raw.get("vm_bind_address", "127.0.0.1")),
-        snapshot_cache_dir=_require_path(raw, "snapshot_cache_dir"),
+        snapshot_cache_dir=_resolve_snapshot_cache_dir(raw),
     )
 
 
-def _require_path(raw: dict, key: str) -> Path:
-    """Fetch a required path field; raise with a clear message if missing.
+def _resolve_snapshot_cache_dir(raw: dict) -> Path:
+    """Master doesn't need a cache (never provisions); worker/standalone require one.
 
-    Cache persistence is load-bearing — templates re-pulled from GCS on every
-    worker restart defeats the point of the snapshot cache. Every worker
-    config must bind `snapshot_cache_dir` to a persistent volume (XFS, to
-    support reflink), so we enforce its presence here.
+    Cache persistence is load-bearing for workers — templates re-pulled
+    from GCS on every restart defeats the point. Master mode runs no
+    local runtime, so we accept a stub path.
     """
-    value = raw.get(key)
-    if not value:
-        raise ValueError(
-            f"host config missing required field '{key}'. "
-            f"See docs/operations/vm-image-maintenance.md for the recommended "
-            f"path (/mnt/xfs/snapshot-cache on XFS-backed volumes)."
-        )
-    return Path(value)
+    value = raw.get("snapshot_cache_dir")
+    if value:
+        return Path(value)
+    mode = str(raw.get("mode", "standalone"))
+    if mode == "master":
+        # Never used; keeps the dataclass field non-optional.
+        return Path("/var/empty/cua-house-master-no-cache")
+    raise ValueError(
+        "host config missing required field 'snapshot_cache_dir'. "
+        "See docs/operations/vm-image-maintenance.md for the recommended "
+        "path (/mnt/xfs/snapshot-cache on XFS-backed volumes)."
+    )
 
 
 def _load_cluster_config(raw: dict | None) -> ClusterConfig | None:
