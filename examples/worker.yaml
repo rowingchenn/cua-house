@@ -18,6 +18,10 @@ public_base_host: @@INTERNAL_IP@@
 # and labels it `xfs-@@WORKER_ID@@` before the service starts.
 runtime_root: /mnt/xfs/runtime-cluster
 
+# Persistent snapshot cache (same XFS volume). Required. Survives worker
+# restarts; purge on image-version bumps per docs/operations/vm-image-maintenance.md.
+snapshot_cache_dir: /mnt/xfs/snapshot-cache
+
 # Shared OverlayFS view — the lower layer is the read-only
 # agenthle-nested-kvm-01-task-data disk (attached RO to every worker),
 # the upper layer is per-node on /mnt/xfs/task-data-upper, and systemd

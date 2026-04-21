@@ -38,6 +38,31 @@ How to update the Windows VM images used by cua-house. There are two image types
 
 **Keep old assets until the new image is confirmed working in production.** Delete old assets only after a successful eval run with the new image.
 
+## Image-version bump SOP
+
+Each worker keeps a persistent snapshot cache at `snapshot_cache_dir`
+(required field in the host config; typically `/mnt/xfs/snapshot-cache`
+on the XFS volume). Entries are keyed by
+`(image_key, image_version, vcpus, memory_gb, disk_gb)` so different
+versions coexist in different subdirs — but in practice, stale versions
+just waste disk and can cause confusion if a worker is rolled back.
+
+When you bump an image's `version` field in `images.yaml` after re-baking:
+
+1. **Stop all workers** (systemd: `systemctl stop cua-house-worker`).
+2. **Purge the cache volume**: `rm -rf /mnt/xfs/snapshot-cache/*` on each
+   worker. (Alternative surgical option: `rm -rf
+   /mnt/xfs/snapshot-cache/<image_key>/v<old_version>/` to keep other
+   images' caches warm. Default to the full wipe unless you have a
+   specific reason otherwise — a single stale shape reviving unexpectedly
+   has historically caused debug sinks.)
+3. **Update `images.yaml`**: bump `local.version`, `local.template_qcow2_path`,
+   and `local.gcs_uri` to the new qcow2.
+4. **Restart workers**. Startup will parallel-pull the new templates from
+   GCS, then re-register with master. The first task of each shape on
+   each worker pays one cold-boot (~4-5 min) before the new version's
+   cache entries are written; subsequent same-shape tasks are fast.
+
 ---
 
 ## CPU VMs (kvm0): `cpu-free`, `cpu-license`

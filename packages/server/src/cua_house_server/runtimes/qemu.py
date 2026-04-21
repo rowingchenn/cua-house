@@ -73,7 +73,7 @@ class DockerQemuRuntime:
         self._hotplug_handles: dict[str, VMHandle] = {}
         # Snapshot cache for shape-keyed loadvm acceleration (cluster mode).
         from cua_house_server.runtimes.snapshot_cache import SnapshotCache, compute_qemu_fingerprint
-        cache_dir = config.snapshot_cache_dir or (config.runtime_root / "snapshot-cache")
+        cache_dir = config.snapshot_cache_dir
         try:
             fp = compute_qemu_fingerprint(config.docker_image)
         except Exception:

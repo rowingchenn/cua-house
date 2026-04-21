@@ -209,7 +209,7 @@ class HostRuntimeConfig:
     # 0.0.0.0 so clients in the VPC can reach VM services directly on the
     # worker's public IP.
     vm_bind_address: str = "127.0.0.1"
-    snapshot_cache_dir: Path | None = None
+    snapshot_cache_dir: Path = field(default_factory=lambda: Path("/mnt/xfs/snapshot-cache"))
 
 
 @dataclass(slots=True)
@@ -281,8 +281,26 @@ def load_host_runtime_config(path: str | Path) -> HostRuntimeConfig:
         mode=str(raw.get("mode", "standalone")),
         cluster=_load_cluster_config(raw.get("cluster")),
         vm_bind_address=str(raw.get("vm_bind_address", "127.0.0.1")),
-        snapshot_cache_dir=Path(raw["snapshot_cache_dir"]) if raw.get("snapshot_cache_dir") else None,
+        snapshot_cache_dir=_require_path(raw, "snapshot_cache_dir"),
     )
+
+
+def _require_path(raw: dict, key: str) -> Path:
+    """Fetch a required path field; raise with a clear message if missing.
+
+    Cache persistence is load-bearing — templates re-pulled from GCS on every
+    worker restart defeats the point of the snapshot cache. Every worker
+    config must bind `snapshot_cache_dir` to a persistent volume (XFS, to
+    support reflink), so we enforce its presence here.
+    """
+    value = raw.get(key)
+    if not value:
+        raise ValueError(
+            f"host config missing required field '{key}'. "
+            f"See docs/operations/vm-image-maintenance.md for the recommended "
+            f"path (/mnt/xfs/snapshot-cache on XFS-backed volumes)."
+        )
+    return Path(value)
 
 
 def _load_cluster_config(raw: dict | None) -> ClusterConfig | None:
