@@ -260,12 +260,37 @@ class WorkerClusterClient:
         interval = self.cluster.heartbeat_interval_s
         while True:
             hb = Heartbeat(
-                load_cpu=0.0,  # TODO: psutil.cpu_percent(None)
-                load_memory=0.0,
                 vm_summaries=list(self._vm_summaries.values()),
+                cached_shapes=self._collect_cached_shapes(),
             )
             await self._send(ws, hb)
             await asyncio.sleep(interval)
+
+    def _collect_cached_shapes(self) -> list:
+        """Runtime introspection of the snapshot cache for master-side affinity.
+
+        Returns a list of CachedShape payloads; empty list if the runtime
+        doesn't expose list_cached_shapes (non-QEMU backends, tests).
+        """
+        from cua_house_server.cluster.protocol import CachedShape
+
+        if not hasattr(self.runtime, "list_cached_shapes"):
+            return []
+        try:
+            entries = self.runtime.list_cached_shapes()
+        except Exception:
+            logger.warning("list_cached_shapes failed; reporting empty", exc_info=True)
+            return []
+        return [
+            CachedShape(
+                image_key=e.image_key,
+                image_version=e.image_version,
+                vcpus=e.vcpus,
+                memory_gb=e.memory_gb,
+                disk_gb=e.disk_gb,
+            )
+            for e in entries
+        ]
 
     async def _recv_loop(self, ws: "websockets.WebSocketClientProtocol") -> None:
         async for raw in ws:

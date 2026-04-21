@@ -128,9 +128,8 @@ async def _dispatch(
     if isinstance(payload, Heartbeat):
         await registry.apply_heartbeat(
             worker_id,
-            load_cpu=payload.load_cpu,
-            load_memory=payload.load_memory,
             vm_summaries=payload.vm_summaries,
+            cached_shapes=payload.cached_shapes,
         )
     elif isinstance(payload, VMStateUpdate):
         await registry.apply_vm_state_update(

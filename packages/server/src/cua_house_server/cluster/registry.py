@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cua_house_server.cluster.protocol import (
+    CachedShape,
     Envelope,
     WorkerCapacity,
     WorkerVMSummary,
@@ -47,8 +48,7 @@ class WorkerSession:
     connected_at: float
     last_heartbeat: float
     vm_summaries: list[WorkerVMSummary] = field(default_factory=list)
-    load_cpu: float = 0.0
-    load_memory: float = 0.0
+    cached_shapes: list[CachedShape] = field(default_factory=list)
     online: bool = True
 
     def free_vm_for(
@@ -129,17 +129,16 @@ class WorkerRegistry:
         self,
         worker_id: str,
         *,
-        load_cpu: float,
-        load_memory: float,
         vm_summaries: list[WorkerVMSummary],
+        cached_shapes: list[CachedShape] | None = None,
     ) -> None:
         async with self._lock:
             session = self._sessions.get(worker_id)
             if session is None or not session.online:
                 return
             session.last_heartbeat = time.monotonic()
-            session.load_cpu = load_cpu
-            session.load_memory = load_memory
+            if cached_shapes is not None:
+                session.cached_shapes = cached_shapes
             # Preserve optimistic lease marks set by the dispatcher.
             # The dispatcher marks a VM as "leased" (with a lease_id and
             # _mark_time) before the worker has received the AssignTask

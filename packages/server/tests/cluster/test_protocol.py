@@ -45,13 +45,15 @@ def test_register_roundtrip() -> None:
 
 
 def test_heartbeat_roundtrip_with_vms() -> None:
+    from cua_house_server.cluster.protocol import CachedShape
     msg = Heartbeat(
-        load_cpu=0.3,
-        load_memory=0.5,
         vm_summaries=[
             WorkerVMSummary(
                 vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"
             )
+        ],
+        cached_shapes=[
+            CachedShape(image_key="cpu-free", image_version="v1", vcpus=4, memory_gb=8, disk_gb=64),
         ],
     )
     _roundtrip_w2m(msg)

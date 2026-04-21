@@ -56,11 +56,10 @@ async def test_heartbeat_updates_vm_summaries() -> None:
     vms = [
         WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="ready"),
     ]
-    await reg.apply_heartbeat("w1", load_cpu=0.2, load_memory=0.3, vm_summaries=vms)
+    await reg.apply_heartbeat("w1", vm_summaries=vms)
     session = await reg.get("w1")
     assert session is not None
     assert len(session.vm_summaries) == 1
-    assert session.load_cpu == 0.2
 
 
 @pytest.mark.asyncio
@@ -90,7 +89,7 @@ async def test_free_vm_for_matches_only_ready() -> None:
         hosted_images=[], ws=ws,  # type: ignore[arg-type]
     )
     await reg.apply_heartbeat(
-        "w1", load_cpu=0.0, load_memory=0.0,
+        "w1",
         vm_summaries=[
             WorkerVMSummary(vm_id="v1", image_key="cpu-free", vcpus=4, memory_gb=8, disk_gb=64, state="leased"),
             WorkerVMSummary(vm_id="v2", image_key="cpu-free", vcpus=8, memory_gb=16, disk_gb=64, state="ready"),

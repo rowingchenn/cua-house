@@ -52,11 +52,10 @@ def build_cluster_api_router(
                 "runtime_version": s.runtime_version,
                 "capacity": s.capacity.model_dump(),
                 "hosted_images": sorted(s.hosted_images),
-                "load_cpu": s.load_cpu,
-                "load_memory": s.load_memory,
                 "connected_at": s.connected_at,
                 "last_heartbeat": s.last_heartbeat,
                 "vm_summaries": [vm.model_dump() for vm in s.vm_summaries],
+                "cached_shapes": [cs.model_dump() for cs in s.cached_shapes],
             }
             for s in sessions
         ]

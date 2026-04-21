@@ -37,6 +37,21 @@ class WorkerCapacity(BaseModel):
     reserved_memory_gb: int = 0
 
 
+class CachedShape(BaseModel):
+    """A single `(image, version, shape)` entry present in a worker's snapshot cache.
+
+    Reported in heartbeats so master can rank workers by cache affinity at
+    placement time: a task whose shape matches a `CachedShape` on worker W
+    resumes via loadvm (~30s) instead of cold-boot (~5min).
+    """
+
+    image_key: str
+    image_version: str
+    vcpus: int
+    memory_gb: int
+    disk_gb: int
+
+
 class WorkerVMSummary(BaseModel):
     """Snapshot of a single VM in the worker's pool, sent with heartbeats."""
 
@@ -88,9 +103,8 @@ class Register(BaseModel):
 
 class Heartbeat(BaseModel):
     kind: Literal["heartbeat"] = "heartbeat"
-    load_cpu: float = 0.0
-    load_memory: float = 0.0
     vm_summaries: list[WorkerVMSummary] = Field(default_factory=list)
+    cached_shapes: list[CachedShape] = Field(default_factory=list)
 
 
 class VMStateUpdate(BaseModel):
@@ -243,6 +257,7 @@ class Envelope(BaseModel):
 
 __all__ = [
     "AssignTask",
+    "CachedShape",
     "Envelope",
     "Heartbeat",
     "MasterToWorker",

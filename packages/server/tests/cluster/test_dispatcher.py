@@ -123,8 +123,6 @@ async def _setup_dispatcher_with_worker(vm_available: bool = True):
     if vm_available:
         await registry.apply_heartbeat(
             "w1",
-            load_cpu=0.0,
-            load_memory=0.0,
             vm_summaries=[
                 WorkerVMSummary(
                     vm_id="vm-1",
@@ -285,8 +283,6 @@ async def test_smallest_fit_vm_selected_for_shape() -> None:
     )
     await registry.apply_heartbeat(
         "w1",
-        load_cpu=0.0,
-        load_memory=0.0,
         vm_summaries=[
             WorkerVMSummary(
                 vm_id="vm-big", image_key="cpu-free",
@@ -330,8 +326,6 @@ async def test_task_stays_queued_when_disk_gb_too_small() -> None:
     )
     await registry.apply_heartbeat(
         "w1",
-        load_cpu=0.0,
-        load_memory=0.0,
         vm_summaries=[
             WorkerVMSummary(
                 vm_id="vm-1", image_key="cpu-free",
