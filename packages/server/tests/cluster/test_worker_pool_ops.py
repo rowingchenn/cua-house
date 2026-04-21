@@ -39,21 +39,28 @@ class _FakeRuntime:
     removed: list[str] = field(default_factory=list)
     _counter: int = 0
     _cluster_catalog: dict[str, Any] = field(default_factory=dict)
+    _handles: dict[str, "_FakeHandle"] = field(default_factory=dict)
 
     async def pull_template(self, image_key: str, image: Any) -> None:
         self.pulled.append(image_key)
 
-    async def add_vm(self, *, image: Any, vcpus: int, memory_gb: int,
-                     disk_gb: int | None = None,
-                     snapshot_name: str | None = None) -> _FakeHandle:
+    async def provision_vm(self, *, image: Any, vcpus: int, memory_gb: int,
+                           disk_gb: int | None = None,
+                           snapshot_name: str | None = None) -> _FakeHandle:
         self._counter += 1
         vm_id = f"vm-{self._counter}"
         resolved_disk = disk_gb if disk_gb is not None else image.default_disk_gb
         self.added.append((image.key, vcpus, memory_gb, resolved_disk))
-        return _FakeHandle(vm_id=vm_id, vcpus=vcpus, memory_gb=memory_gb, disk_gb=resolved_disk)
+        handle = _FakeHandle(vm_id=vm_id, vcpus=vcpus, memory_gb=memory_gb, disk_gb=resolved_disk)
+        self._handles[vm_id] = handle
+        return handle
 
-    async def remove_vm(self, vm_id: str) -> None:
-        self.removed.append(vm_id)
+    def hotplug_handle(self, vm_id: str):
+        return self._handles.get(vm_id)
+
+    async def destroy_vm(self, handle) -> None:
+        self.removed.append(handle.vm_id)
+        self._handles.pop(handle.vm_id, None)
 
 
 @dataclass

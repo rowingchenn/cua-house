@@ -385,7 +385,7 @@ class WorkerClusterClient:
                 if image is None:
                     return False, f"unknown image {args.image_key}", None
                 disk_gb = args.disk_gb if args.disk_gb is not None else image.default_disk_gb
-                handle = await self.runtime.add_vm(
+                handle = await self.runtime.provision_vm(
                     image=image,
                     vcpus=args.vcpus,
                     memory_gb=args.memory_gb,
@@ -422,7 +422,9 @@ class WorkerClusterClient:
                 released = await self.scheduler.unregister_external_vm(args.vm_id)
                 if not released:
                     return False, "vm still leased", None
-                await self.runtime.remove_vm(args.vm_id)
+                handle = self.runtime.hotplug_handle(args.vm_id)
+                if handle is not None:
+                    await self.runtime.destroy_vm(handle)
                 self._vm_summaries.pop(args.vm_id, None)
                 return True, None, None
 

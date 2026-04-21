@@ -884,7 +884,7 @@ class DockerQemuRuntime:
 
     # -- Hot-plug (cluster mode) ---------------------------------------
 
-    async def add_vm(
+    async def provision_vm(
         self,
         *,
         image: ImageSpec,
@@ -892,7 +892,7 @@ class DockerQemuRuntime:
         memory_gb: int,
         disk_gb: int | None = None,
     ) -> VMHandle:
-        """Hot-add a single VM with snapshot-cache acceleration.
+        """Provision a single VM with snapshot-cache acceleration.
 
         Cache hit (shape previously booted on this worker):
           reflink cached qcow2 → slot, docker run with -loadvm, ~seconds.
@@ -902,6 +902,9 @@ class DockerQemuRuntime:
 
         The cold-boot VM immediately serves tasks — the cache write happens
         *after* CUA readiness so the first task doesn't wait for double I/O.
+
+        Callers own the returned handle and must pair each successful call
+        with `destroy_vm(handle)` when the task that requested it is done.
         """
         from uuid import uuid4
         from cua_house_server.runtimes.snapshot_cache import CacheKey, shape_stem
@@ -995,15 +998,16 @@ class DockerQemuRuntime:
         )
         return handle
 
-    async def remove_vm(self, vm_id: str) -> None:
-        """Hot-remove a previously hot-added VM.
+    async def destroy_vm(self, handle: VMHandle) -> None:
+        """Destroy a provisioned VM. Idempotent; unknown handles are no-ops.
 
         Tears down the container, wipes the slot directory, and releases the
-        host-loopback ports back to the runtime's pools. Unknown vm_ids are a
-        no-op so callers can retry safely.
+        host-loopback ports back to the runtime's pools. In the ephemeral-VM
+        model this is called once per task on completion; there is no
+        "revert to ready" path.
         """
-        handle = self._hotplug_handles.pop(vm_id, None)
-        if handle is None:
+        # Drop from tracking table first so double-calls short-circuit.
+        if self._hotplug_handles.pop(handle.vm_id, None) is None:
             return
         async with self._mutation_lock:
             self._run(["docker", "rm", "-f", handle.container_name], check=False)
@@ -1014,8 +1018,8 @@ class DockerQemuRuntime:
                 self._published_port_pool.release(port)
             self._novnc_port_pool.release(handle.novnc_port)
         self.event_logger.emit(
-            "vm_hot_removed",
-            vm_id=vm_id,
+            "vm_destroyed",
+            vm_id=handle.vm_id,
             snapshot_name=handle.snapshot_name,
         )
 
