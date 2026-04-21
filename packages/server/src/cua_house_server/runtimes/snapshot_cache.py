@@ -141,6 +141,36 @@ class SnapshotCache:
             logger.info("snapshot cache startup sweep evicted %d entries", len(evicted))
         return evicted
 
+    def list_entries(self) -> list[CacheKey]:
+        """Enumerate every valid entry in the cache.
+
+        Returned entries' qemu_fingerprint matches the running binary; stale
+        entries are ignored (but not evicted — that's what sweep_on_startup
+        is for). Intended for workers to report cached_shapes back to master.
+        """
+        entries: list[CacheKey] = []
+        if not self.cache_dir.exists():
+            return entries
+        for sidecar in self.cache_dir.rglob("*.json"):
+            try:
+                meta = json.loads(sidecar.read_text())
+            except Exception:
+                continue
+            if meta.get("qemu_fingerprint") != self.qemu_fingerprint:
+                continue
+            shape = meta.get("shape") or {}
+            try:
+                entries.append(CacheKey(
+                    image_key=str(shape["image_key"]),
+                    image_version=str(shape["image_version"]),
+                    vcpus=int(shape["vcpus"]),
+                    memory_gb=int(shape["memory_gb"]),
+                    disk_gb=int(shape["disk_gb"]),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return entries
+
     def purge_version(self, image_key: str, image_version: str) -> int:
         target = self.cache_dir / image_key / f"v{image_version}"
         if not target.exists():

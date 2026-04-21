@@ -85,6 +85,15 @@ class DockerQemuRuntime:
     def slots_root(self) -> Path:
         return self.config.runtime_root / "slots"
 
+    def list_cached_shapes(self) -> list:
+        """Shapes currently present in this worker's snapshot cache.
+
+        Returned list is a snapshot; entries are `SnapshotCache.CacheKey`
+        tuples (image_key, image_version, vcpus, memory_gb, disk_gb).
+        Consumed by heartbeat to inform master-side cache-affinity ranking.
+        """
+        return self._snapshot_cache.list_entries()
+
     async def wait_ready(self, handle: VMHandle) -> None:
         # Probe the first published port for /status readiness.
         primary_port = next(iter(handle.published_ports.values()))
