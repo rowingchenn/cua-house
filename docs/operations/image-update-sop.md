@@ -25,6 +25,42 @@ gcloud compute ssh agenthle-dev-${IMAGE_KEY} \
     --zone=us-west1-a --project=sunblaze-4
 ```
 
+## Step 1b: Pre-export cleanup on the dev VM
+
+Before shutting down and exporting, clean up GCP-specific state that causes
+issues when the image runs outside GCP (on KVM hosts). Run these on the dev VM
+**before** the clean shutdown.
+
+**Linux (cpu-free-ubuntu):**
+
+```bash
+# gsutil lock/cache files — stale copies cause "OSError: File exists" on KVM
+rm -rf /tmp/.gsutil_* /home/user/.gsutil
+
+# gcloud cached credentials — forces fresh token fetch from metadata on next boot
+rm -f /home/user/.config/gcloud/access_tokens.db
+rm -f /home/user/.config/gcloud/credentials.db
+
+# systemd journal vacuum — shrink logs baked into the image
+sudo journalctl --vacuum-size=50M
+
+# apt cache
+sudo apt-get clean
+```
+
+**Windows (cpu-free, cpu-license):**
+
+```powershell
+# gcloud cached credentials
+Remove-Item -Force "$env:APPDATA\gcloud\access_tokens.db" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:APPDATA\gcloud\credentials.db" -ErrorAction SilentlyContinue
+
+# Temp files
+Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
+```
+
+Then shut down cleanly (Linux: `sudo shutdown -h now`, Windows: `shutdown /s /t 0`).
+
 ## Step 2: Export boot disk to qcow2
 
 ```bash
