@@ -286,11 +286,10 @@ class WorkerClusterClient:
     ) -> None:
         correlation_id = envelope.correlation_id or envelope.msg_id
         if isinstance(msg, PoolOp):
-            ok, error, produced = await self._execute_pool_op(msg)
-            await self._send(
-                ws,
-                PoolOpResult(op_id=msg.op_id, ok=ok, error=error, produced_vm_id=produced),
-                correlation_id=correlation_id,
+            # Fire-and-forget so multiple ADD_VM ops cold-boot in parallel
+            # instead of serializing on the recv loop.
+            asyncio.create_task(
+                self._handle_pool_op(ws, msg, correlation_id),
             )
         elif isinstance(msg, AssignTask):
             bound = await self._execute_assign_task(msg)
@@ -301,6 +300,23 @@ class WorkerClusterClient:
         elif isinstance(msg, Shutdown):
             logger.info("Received shutdown from master (graceful=%s)", msg.graceful)
             self._stop.set()
+
+    async def _handle_pool_op(
+        self,
+        ws: "websockets.WebSocketClientProtocol",
+        msg: PoolOp,
+        correlation_id: str,
+    ) -> None:
+        """Execute a pool op concurrently and send the result back."""
+        try:
+            ok, error, produced = await self._execute_pool_op(msg)
+        except Exception as exc:
+            ok, error, produced = False, str(exc), None
+        await self._send(
+            ws,
+            PoolOpResult(op_id=msg.op_id, ok=ok, error=error, produced_vm_id=produced),
+            correlation_id=correlation_id,
+        )
 
     async def _execute_pool_op(
         self, op: PoolOp,

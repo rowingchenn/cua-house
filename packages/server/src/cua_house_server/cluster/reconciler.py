@@ -121,7 +121,7 @@ class PoolReconciler:
         pool_spec: ClusterPoolSpec,
         coordinator: PoolOpCoordinator,
         interval_s: float = 5.0,
-        op_timeout_s: float = 120.0,
+        op_timeout_s: float = 600.0,
         on_worker_evicted: Any = None,
     ) -> None:
         self.registry = registry
@@ -196,15 +196,35 @@ class PoolReconciler:
             worker_id, len(diff),
             ", ".join(f"{e.op}:{e.image_key or e.vm_id}" for e in diff),
         )
+
+        # Sequencing: ADD_IMAGE must complete before ADD_VM (worker needs the
+        # template to cold-boot).  REMOVE_VM must complete before REMOVE_IMAGE.
+        # Within each phase, ops are dispatched concurrently so that multiple
+        # VMs cold-boot in parallel instead of serializing on a single worker.
+        phases: list[list[DiffEntry]] = [[], [], [], []]  # add_img, add_vm, rm_vm, rm_img
         for entry in diff:
-            try:
-                await self._dispatch_op(worker_id, entry)
-            except Exception as exc:
-                logger.warning(
-                    "PoolOp %s failed for worker %s: %s", entry.op, worker_id, exc,
-                )
-                # Bail on this worker's tick; next tick will retry.
-                return
+            if entry.op == "ADD_IMAGE":
+                phases[0].append(entry)
+            elif entry.op == "ADD_VM":
+                phases[1].append(entry)
+            elif entry.op == "REMOVE_VM":
+                phases[2].append(entry)
+            elif entry.op == "REMOVE_IMAGE":
+                phases[3].append(entry)
+
+        for phase in phases:
+            if not phase:
+                continue
+            results = await asyncio.gather(
+                *[self._dispatch_op(worker_id, e) for e in phase],
+                return_exceptions=True,
+            )
+            for entry, result in zip(phase, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "PoolOp %s failed for worker %s: %s",
+                        entry.op, worker_id, result,
+                    )
 
     async def _dispatch_op(self, worker_id: str, entry: DiffEntry) -> PoolOpResult:
         pending = await self.coordinator.issue(worker_id)
