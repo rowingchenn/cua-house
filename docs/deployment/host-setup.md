@@ -36,7 +36,7 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 | `{runtime_root}/slots/` | Per-VM directories (storage/ and logs/) |
 | `{runtime_root}/events.jsonl` | Structured JSONL event log |
 | `{runtime_root}/boot-patched.sh` | Auto-generated patched boot script for snapshot support |
-| `{image_root}/cpu-free-YYYYMMDD.qcow2` | Versioned template qcow2 with pre-baked snapshot. Configured per image in `images.yaml`. |
+| `{image_root}/cpu-free-YYYYMMDD.qcow2` | Versioned template qcow2. Configured per image in `images.yaml`; shape-specific savevm tags are created automatically on first cache miss. |
 | `{task_data_root}/` | Task data mount point. Configured in `server.yaml`. |
 
 Example (XFS setup — images and runtime on the same XFS disk for reflink):
@@ -91,60 +91,36 @@ Edit `images.yaml`:
 - Set `template_qcow2_path` for local images (versioned path, e.g. `cpu-free-20260405.qcow2`)
 - Set `enabled: true` for images you want active
 
-## systemd service
+## Start manually
 
-> **Cluster workers use a different unit.** See
-> [`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service)
-> and [clone-worker.md](clone-worker.md). The section below describes
-> the **standalone** unit. Cluster workers additionally depend on
-> `RequiresMountsFor=/mnt/xfs /mnt/agenthle-task-data`, set
-> `--mode worker`, and read `/etc/cua-house/worker.env` for the
-> cluster join token.
+Current deployments start `cua-house-server` manually with `setsid nohup`
+rather than installing a systemd unit. Adjust paths to match the host.
 
-> **These paths are examples.** Adjust `WorkingDirectory` and `ExecStart`
-> to match your installation. On GCP nested-KVM hosts the repo typically
-> lives at `/home/weichenzhang/cua-house-mnc` and runs via
-> `uv run python -m cua_house_server.cli`. For cluster workers, use
-> [`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service)
-> instead — see [clone-worker.md](clone-worker.md).
-
-Create `/etc/systemd/system/cua-house-server.service`:
-
-```ini
-[Unit]
-Description=cua-house server
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/cua-house
-ExecStart=/opt/cua-house/.venv/bin/cua-house-server \
-    --host-config /etc/cua-house/server.yaml \
-    --image-catalog /etc/cua-house/images.yaml
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
+Standalone example:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable cua-house-server
-sudo systemctl start cua-house-server
+cd /home/weichenzhang/cua-house-mnc
+setsid nohup uv run python -m cua_house_server.cli \
+  --host-config /etc/cua-house/server.yaml \
+  --image-catalog /etc/cua-house/images.yaml \
+  --host 0.0.0.0 --port 8787 --mode standalone \
+  </dev/null >server.log 2>&1 &
+disown
 ```
+
+Cluster workers use `/etc/cua-house/worker.yaml` and
+`/etc/cua-house/worker.env`; see [clone-worker.md](clone-worker.md) for
+the worker-specific manual start command.
 
 ## Firewall
 
-The server listens on a single port (default 8787). All CUA and noVNC traffic is reverse-proxied through this port using host-based routing (`lease-{id}.{base_host}`).
+The server listens on a single port (default 8787). All CUA and noVNC traffic is reverse-proxied through this port using host-based routing (`<service>--<lease_id>.{base_host}`).
 
 Only port 8787 needs to be open to clients. Internal CUA ports (15000-15999) and noVNC ports (18000-18999) bind to 127.0.0.1 and should not be exposed externally.
 
 ## Task data disk provisioning
 
-Task data is organized as `{category}/{task_tag}/{variant}/input/`, `reference/`, `software/`, `output/`. In VM pool mode, `task_data_root` is bind-mounted into each container at `/shared/agenthle` and exposed to guests via Samba (Windows: `E:` drive; Linux: CIFS mount at `/media/user/data/agenthle`).
+Task data is organized as `{category}/{task_tag}/{variant}/input/`, `reference/`, `software/`, `output/`. For local Docker/QEMU VMs, `task_data_root` is bind-mounted into each container at `/shared/agenthle` and exposed to guests via Samba (Windows: `E:` drive; Linux: CIFS mount at `/media/user/data/agenthle`).
 
 ### Simple setup (single-node, read-write)
 

@@ -73,14 +73,15 @@ gpu-free:
     boot_disk_gb: 64
     data_snapshot: agenthle-dev-gpu-free-data-snap
     data_disk_gb: 200
-    default_disk_gb: 64
     gpu_type: nvidia-l4
     gpu_count: 1
     default_machine_type: g2-standard-4
 ```
 
-- `gcp_boot_image` is preferred over `gcp_boot_snapshot` because creating a VM from an image is significantly faster (~14s vs ~100s).
-- `gcp_data_snapshot` is optional. When set, a data disk is created from the snapshot and attached to the VM.
+- `boot_image` is preferred over `boot_snapshot` because creating a VM
+  from an image is significantly faster (~14s vs ~100s).
+- `data_snapshot` is optional. When set, a data disk is created from the
+  snapshot and attached to the VM.
 
 ## Data disk management
 

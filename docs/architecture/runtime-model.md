@@ -121,7 +121,7 @@ snapshot cache — GCP VMs are disposable by design. Boot disk strategy:
 | From image (preferred) | ~14 s | `gcp.boot_image` |
 | From snapshot (fallback) | ~100 s | `gcp.boot_snapshot` |
 
-When `gcp_data_snapshot` is set, a data disk is attached per VM and
+When `gcp.data_snapshot` is set, a data disk is attached per VM and
 auto-deleted on teardown. On boot the server reassigns drive letter
 `E:` to the data disk.
 

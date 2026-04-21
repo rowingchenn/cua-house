@@ -18,10 +18,10 @@ cua-house/
     client/      cua-house-client   async httpx SDK
     server/      cua-house-server   orchestration server
       api/         FastAPI app, routes, auth, reverse proxy
-      scheduler/   task/batch state machine, dispatch loop, lease reaper
+      scheduler/   task/batch state machine, lease state, lease reaper
       runtimes/    DockerQemuRuntime, GCPVMRuntime, RuntimeBackend protocol
       qmp/         QEMU Machine Protocol client (docker exec + nc)
-      data/        task data validation and guest staging (Samba, NTFS ACL)
+      data/        task data validation and guest staging
       config/      YAML config loader, ImageSpec, HostRuntimeConfig
       admin/       image bake workflow
       _internal/   port pool and internal utilities
@@ -62,7 +62,7 @@ uv run cua-house-server              # start server on port 8787
 ## Testing
 
 - Unit suite (`packages/server/tests/`) covers protocol roundtrips, `WorkerRegistry` behavior, and `WorkerClusterClient.build_register_frame`. No Docker / KVM / network dependency; runs in CI.
-- End-to-end validation against a live master + worker lives in [`docs/development/testing.md`](docs/development/testing.md) — admission check, cache-hit / cache-miss provisioning, capacity ledger, worker-disconnect requeue.
+- End-to-end validation against a live master + worker lives in [`docs/development/testing.md`](docs/development/testing.md) - admission check, cache-hit / cache-miss provisioning, capacity ledger, worker-disconnect requeue.
 - Always run `uv run pytest` before proposing commits.
 
 ## Style
@@ -75,7 +75,12 @@ uv run cua-house-server              # start server on port 8787
 ## Adding a new runtime backend
 
 1. Define a new class implementing the `RuntimeBackend` protocol in `packages/server/src/cua_house_server/runtimes/base.py`.
-2. Implement all protocol methods: `cleanup_orphaned_state`, `prepare_slot`, `start_slot`, `reset_slot`, `cua_local_url`, `novnc_local_url`, `validate_runtime_task_data`, `stage_task_phase`.
-3. Register the new runtime in `api/app.py` based on `ImageSpec.runtime_mode`.
-4. Add corresponding image entries to the image catalog YAML.
+2. Implement all protocol methods: `cleanup_orphaned_state`,
+   `prepare_slot`, `start_slot`, `reset_slot`, `vm_published_url`,
+   `novnc_local_url`, `validate_runtime_task_data`, and
+   `stage_task_phase`.
+3. Register the new runtime in `api/app.py` based on the relevant
+   `ImageSpec` section (`local`, `gcp`, or a new section you add to the
+   loader).
+4. Add corresponding nested image entries to the image catalog YAML.
 5. Write unit tests with a fake/mock version of the backend.

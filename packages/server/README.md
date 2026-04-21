@@ -1,6 +1,8 @@
 # cua-house-server
 
-Computer-use VM sandbox orchestration server. Manages the full lifecycle of Windows VMs for agent evaluation: batch submission, task scheduling, lease management, VM boot/revert, task data staging, and reverse proxying.
+Computer-use VM sandbox orchestration server. Manages batch submission,
+task scheduling, lease management, per-task VM provisioning/teardown,
+task data staging, and reverse proxying.
 
 ## Submodule map
 
@@ -22,7 +24,7 @@ src/cua_house_server/
   qmp/
     client.py         QMP client (savevm/loadvm via docker exec + nc)
   data/
-    staging.py        Task data validation, Samba staging, NTFS ACL isolation
+    staging.py        Task data validation and guest staging
   config/
     loader.py         YAML config loader (HostRuntimeConfig, ImageSpec)
     defaults/
@@ -57,17 +59,22 @@ Key fields:
 
 ### images.yaml (image catalog)
 
-Each entry defines a VM image with its runtime mode:
+Each entry defines a VM image with one or both runtime sections:
 
-- **local**: requires `golden_qcow2_path`
-- **gcp**: requires `gcp_project`, `gcp_zone`, `gcp_machine_type`, and either `gcp_boot_image` or `gcp_boot_snapshot`
+- `local`: requires `template_qcow2_path`; optional `gcs_uri` lets the
+  worker prewarm the template from GCS at startup.
+- `gcp`: requires `project`, `zone`, `network`, `service_account`, and
+  either `boot_image` or `boot_snapshot`.
+
+Common top-level fields include `enabled`, `os_family`, and
+`published_ports`.
 
 ## API endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/healthz` | Health check |
-| GET | `/v1/vms` | List VM pool instances and state |
+| GET | `/v1/vms` | List in-flight VM handles on standalone/worker servers |
 | POST | `/v1/batches` | Submit a batch of tasks |
 | GET | `/v1/batches/{id}` | Get batch status |
 | POST | `/v1/batches/{id}/heartbeat` | Refresh batch TTL |
@@ -81,7 +88,10 @@ Each entry defines a VM image with its runtime mode:
 
 All endpoints require `Authorization: Bearer <token>` when `CUA_HOUSE_TOKEN` is set.
 
-The reverse proxy routes requests based on the `Host` header: `lease-{id}.{public_base_host}` is forwarded to the corresponding VM's CUA server. Paths under `/novnc/` are forwarded to the noVNC endpoint.
+The reverse proxy routes requests based on the `Host` header:
+`<service>--<lease_id>.{public_base_host}` is forwarded to the
+corresponding VM service. Use `novnc--<lease_id>` plus the `/novnc/`
+path for noVNC.
 
 ## Running
 

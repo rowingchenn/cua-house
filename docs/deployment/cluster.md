@@ -4,11 +4,10 @@ Standalone cua-house-server runs as a single process on one KVM host. In
 cluster mode that single host is split into two roles:
 
 - **Master** — a small control-plane VM. Accepts batch submissions, talks
-  to workers over a WebSocket, and orchestrates the global image pool.
-  Does NOT host VMs (except for the GPU overflow path, which is a Phase 6
-  TODO).
+  to workers over a WebSocket, and assigns each task to a worker on
+  demand. Does NOT host VMs.
 - **Worker** — a nested-KVM host (e.g. `agenthle-nested-kvm-02`). Pulls
-  qcow2 templates from GCS, boots VMs on demand from master pool ops, and
+  qcow2 templates from GCS, boots one VM per assigned task, and
   serves the per-lease HTTP API (`heartbeat`, `stage-runtime`, `complete`)
   directly to clients.
 
@@ -32,7 +31,7 @@ lease-scoped. The master is never in the per-task data path.
     ┌──────────────┐     ┌──────────────┐
     │   worker A   │     │   worker B   │
     │  (kvm02)     │     │  (kvm03)     │
-    │ ─ pool ops   │     │ ─ pool ops   │
+    │ ─ AssignTask │     │ ─ AssignTask │
     │ ─ lease API  │◀────┼─ client talks directly
     │ ─ docker/qemu│     │   via lease_endpoint
     │ ─ nested VM  │     │ ─ nested VM  │
@@ -164,7 +163,7 @@ images:
       version: "20260413"       # bump when re-baking; invalidates worker snapshot cache
       default_vcpus: 4
       default_memory_gb: 8
-      default_disk_gb: 64       # used when client/pool-spec omits disk_gb
+      default_disk_gb: 64       # used when client omits disk_gb
 ```
 
 ## Startup sequence
@@ -188,33 +187,21 @@ curl -sS http://127.0.0.1:8787/healthz    # {"status":"ok","mode":"master"}
 ### Worker
 
 **To provision a brand-new worker VM** (including boot disk snapshot,
-instance create, mount setup, systemd enable, master registration
-polling), run [`scripts/clone-worker.sh`](../../scripts/clone-worker.sh)
-— see [clone-worker.md](clone-worker.md) for the end-to-end runbook.
+instance create, mount setup, config install, and dry-run validation),
+run [`scripts/clone-worker.sh`](../../scripts/clone-worker.sh) — see
+[clone-worker.md](clone-worker.md) for the end-to-end runbook. The clone
+script does not start the worker process.
 
-**To start a worker manually** on an already-provisioned host that
-has `/etc/cua-house/{worker,images}.yaml` and
-`/etc/systemd/system/cua-house-worker.service` in place:
-
-```bash
-sudo systemctl start cua-house-worker
-sudo journalctl -u cua-house-worker -f
-```
-
-The systemd unit is at
-[`examples/systemd/cua-house-worker.service`](../../examples/systemd/cua-house-worker.service).
-It `EnvironmentFile=`s `/etc/cua-house/worker.env` (mode 0600)
-which holds the `CUA_HOUSE_CLUSTER_JOIN_TOKEN`.
-
-**Legacy / ad-hoc dev path** (used by the currently-running kvm02 and
-kvm03 pending their next restart) — do NOT use for new workers:
+**To start a worker manually** on an already-provisioned host:
 
 ```bash
 cd ~/cua-house-mnc
-export CUA_HOUSE_CLUSTER_JOIN_TOKEN=...
+set -a
+source <(sudo cat /etc/cua-house/worker.env)
+set +a
 setsid nohup uv run python -m cua_house_server.cli \
-  --host-config kvm02-worker.yaml \
-  --image-catalog images.yaml \
+  --host-config /etc/cua-house/worker.yaml \
+  --image-catalog /etc/cua-house/images.yaml \
   --host 0.0.0.0 --port 8787 --mode worker \
   </dev/null >worker.log 2>&1 &
 disown
@@ -268,7 +255,7 @@ Client flow:
    the image declares).
 5. Call `POST <lease_endpoint>/v1/leases/<lease_id>/complete` with
    `{"final_status":"completed"}`.
-6. Worker reverts the VM and notifies master asynchronously; master
+6. Worker destroys the VM and notifies master asynchronously; master
    transitions the task to `completed` and reflects it in the batch.
 
 **Master ossifies the task view at `state=ready`.** Once READY, use the
@@ -361,31 +348,24 @@ entirely.
 ## Smoke test
 
 ```bash
-# 1. Desired state
-curl -sS -X PUT http://<master>:8787/v1/cluster/pool \
-  -H 'Content-Type: application/json' \
-  -d '{"assignments":[{"worker_id":"kvm02","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8}]}'
-
-# 2. Wait ~60s for VM boot
-while [ "$(curl -sS http://<master>:8787/v1/cluster/status | jq .vm_instances)" != "1" ]; do sleep 5; done
-
-# 3. Submit
+# 1. Submit
 curl -sS -X POST http://<master>:8787/v1/batches \
   -H 'Content-Type: application/json' \
   -d '{"batch_id":"smoke","tasks":[{"task_id":"smoke-t1","task_path":"demo","snapshot_name":"cpu-free","vcpus":4,"memory_gb":8}]}'
 
-# 4. Poll until ready
+# 2. Poll until ready. First same-shape task on a worker can cold-boot
+# for several minutes; cache hits are much faster.
 while [ "$(curl -sS http://<master>:8787/v1/tasks/smoke-t1 | jq -r .state)" != "ready" ]; do sleep 2; done
 
-# 5. Get lease_endpoint + lease_id
+# 3. Get lease_endpoint + lease_id
 TASK=$(curl -sS http://<master>:8787/v1/tasks/smoke-t1)
 LEASE=$(echo "$TASK" | jq -r .lease_id)
 EP=$(echo "$TASK" | jq -r .assignment.lease_endpoint)
 
-# 6. Heartbeat
+# 4. Heartbeat
 curl -sS -X POST $EP/v1/leases/$LEASE/heartbeat
 
-# 7. Complete
+# 5. Complete
 curl -sS -X POST $EP/v1/leases/$LEASE/complete \
   -H 'Content-Type: application/json' -d '{"final_status":"completed"}'
 

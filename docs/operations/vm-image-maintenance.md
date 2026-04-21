@@ -49,7 +49,8 @@ just waste disk and can cause confusion if a worker is rolled back.
 
 When you bump an image's `version` field in `images.yaml` after re-baking:
 
-1. **Stop all workers** (systemd: `systemctl stop cua-house-worker`).
+1. **Stop all workers** (`pkill -f cua_house_server.cli` on each worker,
+   or stop the exact manually-started process).
 2. **Purge the cache volume**: `rm -rf /mnt/xfs/snapshot-cache/*` on each
    worker. (Alternative surgical option: `rm -rf
    /mnt/xfs/snapshot-cache/<image_key>/v<old_version>/` to keep other
@@ -253,7 +254,7 @@ qemu-img snapshot -l $QCOW2
 **Always** push the baked qcow2 back to GCS. Skipping this step means the
 `gcs_uri` configured in `images.yaml` no longer matches what's on disk, and
 any future node that pulls the template will get a stale version — either
-missing a savevm tag (pool init fails with "Snapshot does not exist") or
+missing a savevm tag (cache-hit `-loadvm` fails with "Snapshot does not exist") or
 missing a guest-side fix that was added in the local re-bake (e.g. the
 `cifs-utils` pitfall #13 drift we hit with `cpu-free-ubuntu-20260408`).
 
@@ -292,17 +293,21 @@ cpu-free:
 Restart the cua-house server:
 
 ```bash
-# On kvm0
-systemctl restart cua-house-server
-# or if running manually:
-pkill -f cua-house-server && cua-house-server --host-config /etc/cua-house/server.yaml --image-catalog /etc/cua-house/images.yaml &
+pkill -f cua_house_server.cli || true
+setsid nohup uv run python -m cua_house_server.cli \
+  --host-config /etc/cua-house/server.yaml \
+  --image-catalog /etc/cua-house/images.yaml \
+  --host 0.0.0.0 --port 8787 --mode standalone \
+  </dev/null >server.log 2>&1 &
+disown
 ```
 
 Watch startup logs:
 
 ```bash
-tail -f ~/.logs/cua-house/server.log
-# Expect: VM pool ready events within ~30s (not 4-5 min)
+tail -f server.log
+# Expect startup to complete; first same-shape task after the version bump
+# will cold-boot and write a fresh cache entry.
 ```
 
 ### Step 7: Sync task data (if needed)
@@ -343,7 +348,8 @@ gcloud compute images create agenthle-dev-${IMAGE_KEY}-${DATE} \
     --project=$PROJECT
 
 # 4. Update images.yaml
-#    gcp_boot_image: agenthle-dev-gpu-free-20260405
+#    gcp:
+#      boot_image: agenthle-dev-gpu-free-20260405
 ```
 
 ### Data disk → GCP Snapshot
@@ -367,7 +373,8 @@ gcloud compute disks snapshot $DATA_DISK \
     --zone=$ZONE --project=$PROJECT
 
 # Update images.yaml:
-#   gcp_data_snapshot: agenthle-dev-gpu-free-data-20260405
+#   gcp:
+#     data_snapshot: agenthle-dev-gpu-free-data-20260405
 ```
 
 > **Why snapshot instead of image for data disk?** cua-house creates data disks directly from a snapshot via `--source-snapshot`. This is faster (~10s disk creation) and cheaper than going through a GCP Image. Boot disks use GCP Images because `--image` is required for the boot disk in `gcloud compute instances create`.
@@ -379,20 +386,20 @@ After creating new assets, update `/etc/cua-house/images.yaml` on the server:
 ```yaml
 gpu-free:
   enabled: true
-  runtime_mode: gcp
-  gcp_project: sunblaze-4
-  gcp_zone: us-west1-a
-  gcp_network: osworld-vpc
-  gcp_service_account: agenthle-vm-service@sunblaze-4.iam.gserviceaccount.com
-  gcp_machine_type: g2-standard-4
-  gcp_boot_image: agenthle-dev-gpu-free-20260405   # ← updated
-  gcp_data_snapshot: agenthle-dev-gpu-free-data-20260405  # ← updated
-  gcp_boot_disk_gb: 64
-  gcp_data_disk_gb: 200
-  gpu_type: nvidia-l4
-  gpu_count: 1
-  default_vcpus: 4
-  default_memory_gb: 16
+  os_family: linux
+  published_ports: [5000]
+  gcp:
+    project: sunblaze-4
+    zone: us-west1-a
+    network: osworld-vpc
+    service_account: agenthle-vm-service@sunblaze-4.iam.gserviceaccount.com
+    default_machine_type: g2-standard-4
+    boot_image: agenthle-dev-gpu-free-20260405   # updated
+    data_snapshot: agenthle-dev-gpu-free-data-20260405  # updated
+    boot_disk_gb: 64
+    data_disk_gb: 200
+    gpu_type: nvidia-l4
+    gpu_count: 1
 ```
 
 Restart cua-house-server to pick up the new config. GCP VMs are created on-demand so no pool restart is needed.

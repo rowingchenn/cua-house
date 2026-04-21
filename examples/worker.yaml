@@ -1,6 +1,6 @@
 # cua-house worker node configuration template.
 #
-# This is a template — `scripts/clone-worker.sh` renders it into
+# This is a template - `scripts/clone-worker.sh` renders it into
 # /etc/cua-house/worker.yaml on the target host during provisioning,
 # substituting the @@...@@ placeholders. Do NOT commit a hand-edited
 # copy with real values.
@@ -22,18 +22,19 @@ runtime_root: /mnt/xfs/runtime-cluster
 # restarts; purge on image-version bumps per docs/operations/vm-image-maintenance.md.
 snapshot_cache_dir: /mnt/xfs/snapshot-cache
 
-# Shared OverlayFS view — the lower layer is the read-only
+# Shared OverlayFS view - the lower layer is the read-only
 # agenthle-nested-kvm-01-task-data disk (attached RO to every worker),
-# the upper layer is per-node on /mnt/xfs/task-data-upper, and systemd
-# fstab mounts the merged view at /mnt/agenthle-task-data before our
-# unit starts. See docs/deployment/host-setup.md §"Multi-node task-data
-# sharing" for the exact mount recipe.
+# the upper layer is per-node on /mnt/xfs/task-data-upper. The bootstrap
+# script installs fstab entries and mounts the merged view at
+# /mnt/agenthle-task-data before the worker is started manually. See
+# docs/deployment/host-setup.md §"Multi-node task-data sharing" for the
+# exact mount recipe.
 task_data_root: /mnt/agenthle-task-data
 
 docker_image: trycua/cua-qemu-windows:latest
 
-# Leave some headroom for the dockur container supervisor + systemd +
-# journald. Tune per machine shape; kvm02/03 use these values.
+# Leave some headroom for the dockur container supervisor + host services.
+# Tune per machine shape; kvm02/03 use these values.
 host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
 

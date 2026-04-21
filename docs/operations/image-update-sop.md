@@ -160,12 +160,23 @@ git push
 
 # On each KVM worker:
 cd /path/to/cua-house && git pull
-sudo systemctl restart cua-house-worker
+pkill -f cua_house_server.cli || true
+set -a
+source <(sudo cat /etc/cua-house/worker.env)
+set +a
+setsid nohup uv run python -m cua_house_server.cli \
+  --host-config /etc/cua-house/worker.yaml \
+  --image-catalog /etc/cua-house/images.yaml \
+  --host 0.0.0.0 --port 8787 --mode worker \
+  </dev/null >worker.log 2>&1 &
+disown
 ```
 
 ```bash
-# Option B: Provision new workers (handles git clone, config, systemd)
-scripts/clone-worker.sh <kvm-host> <worker-id>
+# Option B: Provision new workers (handles instance, mounts, config, validation)
+scripts/clone-worker.sh --new-id kvm04 --source-instance agenthle-nested-kvm-02 \
+  --master-url ws://<master-ip>:8787/v1/cluster/ws \
+  --join-token "$CUA_HOUSE_CLUSTER_JOIN_TOKEN"
 ```
 
 ## Step 7: Verify deployment
@@ -180,20 +191,11 @@ Checklist:
 ```bash
 MASTER=http://<master-ip>:8787
 
-# Check worker status and hosted images
+# Check worker status, live capacity, and cached shapes
 curl -sS ${MASTER}/v1/cluster/workers | python3 -m json.tool
 
-# Set desired pool state (adjust worker_id to your cluster)
-curl -sS -X PUT ${MASTER}/v1/cluster/pool \
-  -H 'Content-Type: application/json' \
-  -d '{"assignments":[
-    {"worker_id":"kvm02","image_key":"cpu-free","count":1,"vcpus":4,"memory_gb":8,"disk_gb":64}
-  ]}'
-
-# Wait for VM ready (~30s cache hit, ~4-5min cache miss)
-sleep 60
-
-# Submit a smoke task
+# Submit a smoke task. It will create a fresh VM on demand
+# (~30s cache hit, ~4-5min cache miss).
 curl -sS -X POST ${MASTER}/v1/batches \
   -H 'Content-Type: application/json' \
   -d '{"tasks":[{

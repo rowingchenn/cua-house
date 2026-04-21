@@ -119,7 +119,7 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 ### 11a. Local qcow2 drifts from GCS after a re-bake
 
-**Symptom**: New KVM node pool init fails with `Snapshot 'X' does not exist in one or more devices`, OR Linux task data staging fails with `mount.cifs: command not found` even though the fix was already added to the local template. Inspecting the qcow2 on the broken node shows an older bake timestamp than the known-good node.
+**Symptom**: A newly started worker fails template prewarm or the first task for a shape fails with an old guest-side bug (for example Linux task data staging fails with `mount.cifs: command not found`) even though the fix was already added to the local template. Inspecting the qcow2 on the broken node shows an older bake timestamp than the known-good node.
 
 **Root cause**: `prewarm_templates()` at worker startup pulls the template from the `gcs_uri` configured in `images.yaml`. When someone re-bakes a template locally (e.g. to fix a guest-side bug like `cifs-utils`) and forgets to `gsutil cp` the result back to GCS, the local disk on one host diverges from GCS. Future nodes pull the stale GCS version. Hit in practice:
 
@@ -203,7 +203,7 @@ does NOT go through that staging phase (e.g. manual debug), purge
 
 ### 17. Missing savevm tag in qcow2 masquerades as a 15-minute cold-boot hang
 
-**Symptom**: `slot_ready_timeout` after the full `ready_timeout_s` (default 900s) for every VM of a specific `snapshot_name`. events.jsonl shows the full chain `vm_starting → slot_vm_ip_detected → slot_computer_server_wait_started → slot_ready_timeout` with `observed_boot_markers: ["computer_server_wait_started", "vm_ip_detected"]`, which *looks* like Windows booted but CUA never came up. cua-free-ubuntu / waa / any image with a valid savevm work fine in the same pool.
+**Symptom**: `slot_ready_timeout` after the full `ready_timeout_s` (default 900s) for every VM of a specific `snapshot_name`. events.jsonl shows the full chain `vm_starting -> slot_vm_ip_detected -> slot_computer_server_wait_started -> slot_ready_timeout` with `observed_boot_markers: ["computer_server_wait_started", "vm_ip_detected"]`, which *looks* like Windows booted but CUA never came up. Other images or shapes work on the same worker.
 
 **Root cause**: Two independent bugs stacked:
 
@@ -211,7 +211,7 @@ does NOT go through that staging phase (e.g. manual debug), purge
 
 2. QEMU `-loadvm <tag>` with a missing tag **exits non-zero at startup**. `/run/entry.sh` (dockur) then exits. The cua-house wrapper `/entry.sh` spawned `/run/entry.sh` in the background as `VM_PID=$!` but never checks whether that child is still alive — it just loops on `curl 172.30.0.2:5000/status` until `ready_timeout_s`. Meanwhile the `slot_vm_ip_detected` event is emitted the moment the wrapper's internal VM_IP detection runs — but that detection is `ps aux | grep dnsmasq | grep -oP '(?<=--dhcp-range=)[0-9.]+'`, i.e. it reads the **dnsmasq command line**, not an actual DHCP lease. dnsmasq starts long before QEMU does, so `vm_ip_detected` fires even for a container whose VM never booted. The event is a **false positive** and cannot be used as evidence that the guest OS actually reached the network stack.
 
-**Diagnostic shortcut**: On a failed pool slot, `docker exec <container> ps auxf` and look for `qemu-system-x86_64`. If absent, the VM never actually started — don't waste time debugging autologon or in-guest services. Check `qemu-img snapshot -l` on the template first.
+**Diagnostic shortcut**: On a failed slot, `docker exec <container> ps auxf` and look for `qemu-system-x86_64`. If absent, the VM never actually started; do not spend time debugging autologon or in-guest services. Check `qemu-img snapshot -l` on the slot qcow2 if this is a cache-hit path.
 
 **Fix / current status**: This pitfall is now largely mitigated by the automatic savevm behavior introduced with shape-based snapshot tags.
 
@@ -291,8 +291,8 @@ Between READY and the worker finishing `destroy_vm` (typically a few seconds: `d
 
 ### 25. Cloned worker inherits stale `runtime_root/slots/*` from the source snapshot
 
-**Symptom**: A freshly cloned worker starts successfully, registers with master, accepts an `ADD_VM` pool op, but the new VM's storage dir already exists on disk (`EEXIST`-style failures from `_prepare_vm`) or — worse — `docker run` succeeds against a zombie qcow2 from the source host with an unpredictable guest filesystem.
+**Symptom**: A freshly cloned worker starts successfully, registers with master, accepts an `AssignTask`, but the new VM's storage dir already exists on disk (`EEXIST`-style failures from `_prepare_vm`) or — worse — `docker run` succeeds against a zombie qcow2 from the source host with an unpredictable guest filesystem.
 
 **Root cause**: The GCE boot-disk snapshot `scripts/clone-worker.sh` uses is taken **live** from a running source worker (kvm02). If that worker had any in-flight slots at snapshot time, the slot directories under `/mnt/xfs/runtime-cluster/slots/` are frozen into the snapshot. `cleanup_orphaned_state()` on the cloned worker kills docker containers with matching names (safe), but it does **not** touch the `slots/` directories — those are pure host filesystem state.
 
-**Fix**: Done in `scripts/_clone-worker-bootstrap.sh` — the post-SSH bootstrap block unconditionally `rm -rf`s `/mnt/xfs/runtime-cluster/slots` and the legacy `~/cua-house-mnc/runtime/slots` (if present) before enabling the systemd unit. If you run a manual clone without the bootstrap script, you **must** perform this cleanup yourself or the first ADD_VM will hit surprising failures.
+**Fix**: Done in `scripts/_clone-worker-bootstrap.sh` — the post-SSH bootstrap block unconditionally `rm -rf`s `/mnt/xfs/runtime-cluster/slots` and the legacy `~/cua-house-mnc/runtime/slots` (if present) before the worker is started manually. If you run a manual clone without the bootstrap script, you **must** perform this cleanup yourself or the first `AssignTask` will hit surprising failures.

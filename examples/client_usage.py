@@ -20,7 +20,7 @@ async def main() -> None:
                 TaskRequirement(
                     task_id="example-task-001",
                     task_path="tasks/demo",
-                    image_key="cpu-free",
+                    snapshot_name="cpu-free",
                     vcpus=4,
                     memory_gb=16,
                 ),

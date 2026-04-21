@@ -59,8 +59,11 @@ Enabled lint rules: `E` (pycodestyle), `F` (pyflakes), `B` (bugbear), `I` (isort
 
 1. Read the `RuntimeBackend` protocol in `packages/server/src/cua_house_server/runtimes/base.py`.
 2. Create a new module in `runtimes/` implementing all protocol methods.
-3. Register the runtime in `packages/server/src/cua_house_server/api/app.py` based on `ImageSpec.runtime_mode`.
-4. Add image entries in the image catalog YAML with the new `runtime_mode` value.
+3. Register the runtime in `packages/server/src/cua_house_server/api/app.py`
+   based on the relevant `ImageSpec` section (`local`, `gcp`, or a new
+   section you add to the loader).
+4. Add image entries in the image catalog YAML with the runtime-specific
+   nested config.
 5. Write unit tests using a mock/fake version of the backend.
 
 ## PR workflow

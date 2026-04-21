@@ -13,7 +13,7 @@ images:
 
   # Canonical CPU-only Windows image. local.template_qcow2_path is where
   # the qcow2 lives on the host filesystem; if missing and gcs_uri is
-  # set, the worker pulls it on first ADD_IMAGE via pull_template.
+  # set, the worker pulls it during startup prewarm.
   cpu-free:
     enabled: true
     os_family: windows            # windows | linux

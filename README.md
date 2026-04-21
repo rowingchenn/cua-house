@@ -2,7 +2,9 @@
 
 Computer-use VM sandbox orchestrator.
 
-cua-house manages Docker+QEMU Windows VMs and GCP VMs for agent evaluation and training. It provides lease-based allocation, reverse proxying, snapshot-based fast revert, and task data staging with NTFS ACL isolation.
+cua-house manages Docker+QEMU VMs and GCP VMs for agent evaluation and
+training. It provides task-based VM provisioning, lease APIs, reverse
+proxying, per-worker snapshot caching, and task data staging.
 
 It can run as a **single-node standalone server** or as a **multi-node cluster** with a master control plane orchestrating a fleet of worker nodes. See [Cluster deployment](docs/deployment/cluster.md) for the cluster model and [Cluster architecture](docs/architecture/cluster.md) for the design.
 
@@ -38,13 +40,16 @@ uv run cua-house-server --host-config /path/to/server.yaml --image-catalog /path
 
 ### Cluster mode
 
-The same binary runs as `master`, `worker`, or the default `standalone` via `--mode`. A minimal cluster is one master VM plus one or more worker VMs that pull VM templates from GCS on demand.
+The same binary runs as `master`, `worker`, or the default `standalone`
+via `--mode`. A minimal cluster is one master VM plus one or more worker
+VMs. Workers prewarm enabled local templates from GCS at startup and
+then create one VM per assigned task.
 
 ```bash
 # master: coordinates workers, accepts batches, stays out of the task data path
 uv run cua-house-server --mode master --host-config master.yaml --image-catalog images.yaml
 
-# worker: joins the master over WebSocket and hosts dynamic VM pool
+# worker: joins the master over WebSocket and provisions task-bound VMs
 CUA_HOUSE_CLUSTER_JOIN_TOKEN=... \
   uv run cua-house-server --mode worker --host-config worker.yaml --image-catalog images.yaml
 ```

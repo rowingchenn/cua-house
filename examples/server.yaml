@@ -1,7 +1,7 @@
 # cua-house-server host runtime configuration
 #
 # This file configures the server's host-level settings: identity,
-# resource limits, timeouts, and VM pool.
+# resource limits, timeouts, and local VM provisioning.
 
 # Unique identifier for this host (used in event logs and task assignments)
 host_id: my-host-01
@@ -12,7 +12,7 @@ host_external_ip: auto
 
 # Base hostname for lease-based routing.
 # Set to "auto" to derive from external IP ({ip}.sslip.io).
-# Lease URLs become: lease-{id}.{public_base_host}:8787
+# Lease URLs use Host headers like <service>--<lease_id>.{public_base_host}:8787.
 public_base_host: auto
 
 # Directory for runtime state (overlays, logs, events.jsonl).
@@ -27,7 +27,8 @@ snapshot_cache_dir: /mnt/xfs/snapshot-cache
 
 # Directory containing task input/reference/software data.
 # Set to null if tasks don't use task data.
-# For VM pool: mounted into containers at /shared/ and mapped as E: in guest.
+# For local Docker/QEMU VMs: mounted into containers at /shared/ and
+# mapped as E: in Windows guests.
 task_data_root: /mnt/task-data
 
 # Docker image for QEMU containers (local runtime).

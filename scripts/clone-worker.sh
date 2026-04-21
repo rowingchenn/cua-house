@@ -1,5 +1,5 @@
 #!/bin/bash
-# clone-worker.sh — provision a new cua-house worker node on GCP by
+# clone-worker.sh - provision a new cua-house worker node on GCP by
 # cloning a golden boot-disk snapshot taken from an existing worker.
 #
 # Usage:
@@ -10,12 +10,11 @@
 #       --join-token "$CUA_HOUSE_CLUSTER_JOIN_TOKEN"
 #
 # See docs/deployment/clone-worker.md for the full runbook, including
-# the post-provision pool-spec append and smoke-test steps.
+# the manual worker start and smoke-test steps.
 #
 # This script takes NO destructive actions on kvm02/kvm03 or master.
 # The worst it can do to the existing cluster is take a live snapshot
-# of kvm02's boot disk (non-disruptive) and append a new assignment to
-# the pool spec (only if --update-pool is passed).
+# of kvm02's boot disk (non-disruptive).
 set -euo pipefail
 
 # ---------- defaults ----------
@@ -32,7 +31,6 @@ SOURCE_SNAPSHOT=""
 NEW_ID=""
 MASTER_URL=""
 JOIN_TOKEN=""
-UPDATE_POOL=0
 DRY_RUN=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -45,14 +43,17 @@ Usage: $0 --new-id <ID> --master-url <URL> --join-token <TOKEN> \\
           [--project sunblaze-4] [--zone us-central1-a] [--vpc agenthle-vpc] \\
           [--xfs-size-gb 512] \\
           [--task-data-disk agenthle-nested-kvm-01-task-data] \\
-          [--update-pool] [--dry-run]
+          [--dry-run]
 
-Required:
+Required or prompted:
   --new-id <ID>              GCE instance suffix + cluster worker_id,
                              e.g. kvm04. Must be unique in both GCE and
                              master's WorkerRegistry.
-  --master-url <URL>         ws://master-internal-ip:8787/v1/cluster/ws
-  --join-token <TOKEN>       shared CUA_HOUSE_CLUSTER_JOIN_TOKEN
+  --master-url <URL>         ws://master-internal-ip:8787/v1/cluster/ws.
+                             If omitted in a TTY, the script prompts.
+  --join-token <TOKEN>       shared CUA_HOUSE_CLUSTER_JOIN_TOKEN.
+                             If omitted, the script uses the env var or
+                             prompts in a TTY.
 
 Source (pick one):
   --source-instance <NAME>   take a live boot-disk snapshot of this
@@ -63,8 +64,6 @@ Source (pick one):
                              (e.g. agenthle-worker-boot-golden-20260414)
 
 Optional:
-  --update-pool              after master sees the new worker, append its
-                             assignment to /v1/cluster/pool idempotently.
   --dry-run                  print every gcloud/ssh command without
                              executing anything.
 EOF
@@ -84,12 +83,28 @@ while [[ $# -gt 0 ]]; do
         --vpc)                  VPC="$2"; shift 2 ;;
         --xfs-size-gb)          XFS_SIZE_GB="$2"; shift 2 ;;
         --task-data-disk)       TASK_DATA_DISK="$2"; shift 2 ;;
-        --update-pool)          UPDATE_POOL=1; shift ;;
         --dry-run)              DRY_RUN=1; shift ;;
         -h|--help)              usage; exit 0 ;;
         *)                      echo "unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Master connection info is required to render worker.yaml and worker.env.
+# In interactive operator runs, ask before validation; in non-interactive
+# automation, keep failing fast unless args/env were provided.
+if [[ -z "${MASTER_URL}" && -n "${CUA_HOUSE_MASTER_URL:-}" ]]; then
+    MASTER_URL="${CUA_HOUSE_MASTER_URL}"
+fi
+if [[ -z "${MASTER_URL}" && -t 0 ]]; then
+    read -r -p "Master WebSocket URL (ws://<master-ip>:8787/v1/cluster/ws): " MASTER_URL
+fi
+if [[ -z "${JOIN_TOKEN}" && -n "${CUA_HOUSE_CLUSTER_JOIN_TOKEN:-}" ]]; then
+    JOIN_TOKEN="${CUA_HOUSE_CLUSTER_JOIN_TOKEN}"
+fi
+if [[ -z "${JOIN_TOKEN}" && -t 0 ]]; then
+    read -r -s -p "Cluster join token: " JOIN_TOKEN
+    printf '\n'
+fi
 
 # ---------- arg validation ----------
 MISSING=()
@@ -195,10 +210,9 @@ fi
 # Required template files.
 WORKER_TEMPLATE="${REPO_ROOT}/examples/worker.yaml"
 IMAGES_CATALOG="${REPO_ROOT}/examples/images.yaml"
-UNIT_FILE="${REPO_ROOT}/examples/systemd/cua-house-worker.service"
 BOOTSTRAP_FILE="${SCRIPT_DIR}/_clone-worker-bootstrap.sh"
 
-for f in "${WORKER_TEMPLATE}" "${UNIT_FILE}" "${BOOTSTRAP_FILE}"; do
+for f in "${WORKER_TEMPLATE}" "${BOOTSTRAP_FILE}"; do
     [[ -f "${f}" ]] || fail "missing required template/file: ${f}"
 done
 if [[ ! -f "${IMAGES_CATALOG}" ]]; then
@@ -212,7 +226,7 @@ if [[ -n "${SOURCE_INSTANCE}" ]]; then
     SOURCE_SNAPSHOT="agenthle-worker-boot-golden-$(date +%Y%m%d-%H%M%S)"
     step "Taking live boot-disk snapshot of ${SOURCE_INSTANCE}"
     info "snapshot will be named ${SOURCE_SNAPSHOT}"
-    info "this is non-disruptive — source instance keeps running"
+    info "this is non-disruptive - source instance keeps running"
     run gcloud compute disks snapshot "${SOURCE_INSTANCE}" \
         --project="${PROJECT}" --zone="${ZONE}" \
         --snapshot-names="${SOURCE_SNAPSHOT}" \
@@ -277,13 +291,12 @@ info "rendered ${RENDERED_DIR}/worker.yaml"
 
 cat > "${RENDERED_DIR}/worker.env" <<EOF
 # Installed by scripts/clone-worker.sh on $(date -u +'%Y-%m-%dT%H:%M:%SZ')
-# mode 0600 — contains the cluster join secret.
+# mode 0600 - contains the cluster join secret.
 CUA_HOUSE_CLUSTER_JOIN_TOKEN=${JOIN_TOKEN}
 EOF
 chmod 600 "${RENDERED_DIR}/worker.env"
 
 cp "${IMAGES_CATALOG}" "${RENDERED_DIR}/images.yaml"
-cp "${UNIT_FILE}" "${RENDERED_DIR}/cua-house-worker.service"
 cp "${BOOTSTRAP_FILE}" "${RENDERED_DIR}/clone-worker-bootstrap.sh"
 
 step "scp artifacts to ${INSTANCE_NAME}:/tmp/"
@@ -292,7 +305,6 @@ run gcloud compute scp \
     "${RENDERED_DIR}/worker.yaml" \
     "${RENDERED_DIR}/images.yaml" \
     "${RENDERED_DIR}/worker.env" \
-    "${RENDERED_DIR}/cua-house-worker.service" \
     "${RENDERED_DIR}/clone-worker-bootstrap.sh" \
     "${INSTANCE_NAME}":/tmp/
 
@@ -301,66 +313,6 @@ step "Running remote bootstrap on ${INSTANCE_NAME}"
 run gcloud compute ssh "${INSTANCE_NAME}" \
     --project="${PROJECT}" --zone="${ZONE}" \
     --command='bash /tmp/clone-worker-bootstrap.sh'
-
-# ---------- phase 8: master join poll ----------
-step "Polling master for ${NEW_ID} registration"
-if (( DRY_RUN == 0 )); then
-    JOINED=0
-    for attempt in $(seq 1 24); do
-        if curl -sS --max-time 5 "${MASTER_HTTP}/v1/cluster/workers" 2>/dev/null \
-                | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for w in data:
-    if w['worker_id'] == '${NEW_ID}' and w['online']:
-        sys.exit(0)
-sys.exit(1)
-" 2>/dev/null; then
-            info "worker ${NEW_ID} online after ${attempt}x5s"
-            JOINED=1
-            break
-        fi
-        sleep 5
-    done
-    if (( JOINED == 0 )); then
-        warn "master did not see ${NEW_ID} within 120s"
-        warn "check: gcloud compute ssh ${INSTANCE_NAME} -- sudo journalctl -u cua-house-worker -n 80"
-    fi
-fi
-
-# ---------- phase 9: optional pool-spec update ----------
-if (( UPDATE_POOL == 1 )); then
-    step "Appending ${NEW_ID} to master /v1/cluster/pool"
-    if (( DRY_RUN == 0 )); then
-        CURRENT_SPEC=$(curl -sS "${MASTER_HTTP}/v1/cluster/pool")
-        NEW_SPEC=$(CURRENT_SPEC="${CURRENT_SPEC}" NEW_ID="${NEW_ID}" python3 -c "
-import json, os
-spec = json.loads(os.environ['CURRENT_SPEC'])
-spec.setdefault('assignments', []).append({
-    'worker_id': os.environ['NEW_ID'],
-    'image_key': 'cpu-free',
-    'count': 1,
-    'vcpus': 4,
-    'memory_gb': 8,
-})
-print(json.dumps(spec))
-")
-        echo "${NEW_SPEC}" | curl -sS -X PUT "${MASTER_HTTP}/v1/cluster/pool" \
-            -H 'Content-Type: application/json' -d @-
-        info "pool spec updated; reconciler will push ADD_IMAGE + ADD_VM shortly"
-    else
-        info "(dry run — skipping pool update)"
-    fi
-else
-    info "--update-pool not set; to add ${NEW_ID} to the pool:"
-    info ""
-    info "  curl -sS ${MASTER_HTTP}/v1/cluster/pool > /tmp/pool.json"
-    info "  python3 -c \"import json; d=json.load(open('/tmp/pool.json')); \\"
-    info "    d['assignments'].append({'worker_id':'${NEW_ID}','image_key':'cpu-free',\\"
-    info "    'count':1,'vcpus':4,'memory_gb':8}); print(json.dumps(d))\" > /tmp/pool-new.json"
-    info "  curl -sS -X PUT ${MASTER_HTTP}/v1/cluster/pool \\"
-    info "    -H 'Content-Type: application/json' -d @/tmp/pool-new.json"
-fi
 
 # ---------- summary ----------
 END_TIME=$(date +%s)
@@ -372,8 +324,22 @@ info "lease_endpoint:    http://${INTERNAL_IP}:8787"
 info "join token sha256: $(token_fingerprint)"
 info "source snapshot:   ${SOURCE_SNAPSHOT}"
 info "elapsed:           ${ELAPSED}s"
+info ""
+info "manual start on worker:"
+info "  gcloud compute ssh ${INSTANCE_NAME} --project=${PROJECT} --zone=${ZONE}"
+info "  cd /home/weichenzhang/cua-house-mnc"
+info "  set -a; source <(sudo cat /etc/cua-house/worker.env); set +a"
+info "  setsid nohup uv run python -m cua_house_server.cli \\"
+info "    --host-config /etc/cua-house/worker.yaml \\"
+info "    --image-catalog /etc/cua-house/images.yaml \\"
+info "    --host 0.0.0.0 --port 8787 --mode worker \\"
+info "    </dev/null >worker.log 2>&1 &"
+info "  disown"
+info ""
+info "verify after manual start:"
+info "  curl -sS ${MASTER_HTTP}/v1/cluster/workers | python3 -m json.tool"
 if (( DRY_RUN == 1 )); then
-    printf '\n\033[1;33mDRY RUN — no changes made.\033[0m\n'
+    printf '\n\033[1;33mDRY RUN - no changes made.\033[0m\n'
 else
-    printf '\n\033[1;32mClone complete. Worker %s is live.\033[0m\n' "${NEW_ID}"
+    printf '\n\033[1;32mClone bootstrap complete. Start worker %s manually when ready.\033[0m\n' "${NEW_ID}"
 fi

@@ -5,9 +5,10 @@
 #
 # The calling script (scripts/clone-worker.sh) scp's this file to the
 # target as /tmp/clone-worker-bootstrap.sh and invokes it with no args.
-# All required config has already been scp'd into /etc/cua-house/.
+# All required config has already been scp'd into /tmp and is installed
+# into /etc/cua-house/ below.
 #
-# The block is idempotent — re-running it on an already-provisioned
+# The block is idempotent - re-running it on an already-provisioned
 # worker should be a no-op. This matters because the clone script may
 # need to retry individual phases during debugging.
 #
@@ -70,8 +71,8 @@ mount_if_unmounted /mnt/agenthle-task-data-ro
 #
 # /mnt/xfs/images also has to exist because /home/weichenzhang/agenthle-env-images
 # is a symlink to it (baked into the cloned boot disk). The worker's
-# pull_template will auto-populate it from GCS on first ADD_IMAGE; we
-# only need the dir to exist so the symlink resolves.
+# worker startup prewarm will auto-populate it from GCS; we only need
+# the dir to exist so the symlink resolves.
 sudo mkdir -p /mnt/xfs/task-data-upper /mnt/xfs/task-data-work \
               /mnt/xfs/runtime-cluster /mnt/xfs/images
 
@@ -85,11 +86,11 @@ sudo chown weichenzhang:weichenzhang /mnt/agenthle-task-data || true
 # ---------- 4. Stale slot cleanup ----------
 # A cloned boot disk may carry slot dirs from the source node. Their
 # qcow2 overlays reference vm_ids the new worker would reuse after
-# cleanup_orphaned_state() kills the containers — wiping the dirs now
+# cleanup_orphaned_state() kills the containers - wiping the dirs now
 # is safer than trusting docker's container removal to cascade.
 log "wiping stale runtime-cluster slots"
 sudo rm -rf /mnt/xfs/runtime-cluster/slots
-# legacy home-dir runtime from the baked standalone config — also wipe
+# legacy home-dir runtime from the baked standalone config - also wipe
 # if present so it doesn't confuse a poking operator.
 if [[ -d /home/weichenzhang/cua-house-mnc/runtime/slots ]]; then
     sudo -u weichenzhang rm -rf /home/weichenzhang/cua-house-mnc/runtime/slots || true
@@ -97,7 +98,7 @@ fi
 
 # ---------- 5. Kill any stale nohup cua-house processes ----------
 # The boot snapshot was taken while kvm02 was running. pkill here is
-# idempotent — if there's nothing matching, it returns non-zero which
+# idempotent - if there's nothing matching, it returns non-zero which
 # we swallow.
 log "killing stale cua_house_server processes (if any)"
 sudo pkill -9 -f cua_house_server.cli || true
@@ -118,13 +119,13 @@ sudo -u weichenzhang bash -c '
         git pull --ff-only --quiet 2>&1 | tail -3 || \
             echo "[bootstrap] git pull failed; continuing with baked repo state"
     else
-        echo "[bootstrap] not a git repo — using baked source tree as-is"
+        echo "[bootstrap] not a git repo - using baked source tree as-is"
     fi
     uv sync 2>&1 | tail -3
 '
 
 # ---------- 7. Install config files ----------
-# clone-worker.sh already scp'd the rendered yaml + env + unit into /tmp.
+# clone-worker.sh already scp'd the rendered yaml + env into /tmp.
 # Move them into place with the right perms here so secrets don't pass
 # through a world-readable scp landing dir.
 sudo mkdir -p /etc/cua-house
@@ -138,14 +139,10 @@ if [[ -f /tmp/worker.env ]]; then
     sudo install -m 0600 -o root -g root /tmp/worker.env /etc/cua-house/worker.env
     rm -f /tmp/worker.env
 fi
-if [[ -f /tmp/cua-house-worker.service ]]; then
-    sudo install -m 0644 /tmp/cua-house-worker.service /etc/systemd/system/cua-house-worker.service
-    rm -f /tmp/cua-house-worker.service
-fi
 
 # ---------- 8. Dry-run config validation ----------
-# Use the --print-register-frame path to catch typos BEFORE we let
-# systemd start a restart loop on a broken config.
+# Use the --print-register-frame path to catch typos before the operator
+# starts the worker manually.
 log "validating config via --print-register-frame"
 sudo -u weichenzhang bash -c '
     set -e
@@ -169,16 +166,9 @@ sudo -u weichenzhang bash -c '
     echo "... (full frame at /tmp/register-frame.json)"
 '
 
-# ---------- 9. Enable + start the systemd unit ----------
-log "systemctl daemon-reload && enable --now cua-house-worker"
-sudo systemctl daemon-reload
-sudo systemctl enable --now cua-house-worker
-
-# Give it a few seconds to actually start, then print status for the
-# operator tail. Non-fatal if active check races.
-sleep 3
-log "cua-house-worker status:"
-sudo systemctl is-active cua-house-worker || true
-sudo journalctl -u cua-house-worker -n 20 --no-pager || true
-
-log "bootstrap complete"
+log "bootstrap complete; worker was not started"
+log "manual start:"
+log "  cd /home/weichenzhang/cua-house-mnc"
+log "  set -a; source <(sudo cat /etc/cua-house/worker.env); set +a"
+log "  setsid nohup uv run python -m cua_house_server.cli --host-config /etc/cua-house/worker.yaml --image-catalog /etc/cua-house/images.yaml --host 0.0.0.0 --port 8787 --mode worker </dev/null >worker.log 2>&1 &"
+log "  disown"
