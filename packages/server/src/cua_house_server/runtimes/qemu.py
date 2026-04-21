@@ -436,9 +436,37 @@ class DockerQemuRuntime:
         )
 
     async def _ensure_local_templates(self, images: dict[str, ImageSpec]) -> None:
-        """Pull all missing templates in an image catalog."""
+        """Pull all missing templates in an image catalog (sequential)."""
         for key, image in images.items():
             await self.pull_template(key, image)
+
+    async def prewarm_templates(self, images: dict[str, ImageSpec]) -> None:
+        """Pull every enabled local image's template in parallel.
+
+        Runs at worker startup before the WS Register. Any failure raises
+        and propagates to the caller so the process can fail-fast (systemd
+        / docker restart then retries). Idempotent per-image pull, so
+        re-runs after a partial previous run only fetch what's missing.
+        """
+        targets = [
+            (key, image)
+            for key, image in images.items()
+            if image.enabled and image.local is not None
+        ]
+        if not targets:
+            return
+        logger.info("prewarming %d templates: %s", len(targets), [k for k, _ in targets])
+        start = time.perf_counter()
+        await asyncio.gather(
+            *[self.pull_template(key, image) for key, image in targets]
+        )
+        elapsed_s = time.perf_counter() - start
+        logger.info("prewarm completed in %.1fs", elapsed_s)
+        self.event_logger.emit(
+            "templates_prewarmed",
+            image_count=len(targets),
+            elapsed_s=round(elapsed_s, 1),
+        )
 
     def _prepare_vm(
         self,

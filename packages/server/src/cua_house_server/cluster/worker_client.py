@@ -150,6 +150,12 @@ class WorkerClusterClient:
             evicted = self.runtime._snapshot_cache.sweep_on_startup()
             if evicted:
                 logger.info("snapshot cache sweep evicted %d stale entries", len(evicted))
+        # Prewarm all enabled image templates before registering with master.
+        # Any failure raises out of lifespan → uvicorn exits → systemd/docker
+        # restart retries with a clean state.
+        catalog = getattr(self.runtime, "_cluster_catalog", None) or {}
+        if catalog and hasattr(self.runtime, "prewarm_templates"):
+            await self.runtime.prewarm_templates(catalog)
         self._supervisor = asyncio.create_task(self._run_forever())
 
     async def stop(self) -> None:
