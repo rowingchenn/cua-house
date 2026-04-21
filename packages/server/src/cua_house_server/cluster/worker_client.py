@@ -59,17 +59,24 @@ logger = logging.getLogger(__name__)
 _MasterToWorkerAdapter = TypeAdapter(MasterToWorker)
 
 
-def _public_rewrite(local_url: str, public_host: str) -> str:
-    """Replace the host in a loopback URL with the worker's public address.
+def _proxy_url(service: str | int, lease_id: str, public_base_host: str, public_port: int) -> str:
+    """Build a Host-header-routable URL that hits the worker's 8787 proxy.
 
-    ``http://127.0.0.1:16001/x`` → ``http://<public_host>:16001/x``. Used
-    to publish VM URLs back to clients via master.
+    Worker exposes port 8787 publicly (firewall: `agenthle-allow-env-server`,
+    0.0.0.0/0). VM docker ports (16000-18999) are VPC-only (`agenthle-allow-
+    vm-ports`, 10.0.0.0/8), so clients outside the VPC cannot reach them
+    directly. This function emits URLs of the form
+
+        http://<service>--<lease_id>.<public_base_host>:8787/
+
+    `public_base_host` must resolve (via DNS, or sslip.io's wildcard-IP
+    scheme, or /etc/hosts) to the worker's external IP. The worker's own
+    FastAPI catch-all parses the Host header via ``parse_proxy_host``
+    (see ``api/proxy.py``), looks the VM up by lease_id, and forwards to
+    the local CUA port. `service` is the guest port (5000 for CUA) or
+    the literal string "novnc".
     """
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(local_url)
-    if parsed.port is None:
-        return local_url
-    return urlunparse(parsed._replace(netloc=f"{public_host}:{parsed.port}"))
+    return f"http://{service}--{lease_id}.{public_base_host}:{public_port}/"
 
 
 class WorkerClusterClient:
@@ -408,13 +415,17 @@ class WorkerClusterClient:
             published_ports=dict(handle.published_ports),
             novnc_port=handle.novnc_port,
         )
-        # Rewrite scheduler loopback URLs to the worker's public host.
+        # Public URLs route through the worker's 8787 proxy so clients
+        # never need direct access to the VM's docker-mapped ports
+        # (16000-18999, VPC-only per the firewall rules).
+        base_host = self.host_config.public_base_host
+        port = self.cluster.worker_public_port
         public_urls = {
-            guest_port: _public_rewrite(local_url, self.public_host)
-            for guest_port, local_url in task.assignment.urls.items()
+            guest_port: _proxy_url(guest_port, msg.lease_id, base_host, port)
+            for guest_port in task.assignment.urls
         }
         public_novnc = (
-            _public_rewrite(task.assignment.novnc_url, self.public_host)
+            _proxy_url("novnc", msg.lease_id, base_host, port)
             if task.assignment.novnc_url else None
         )
         return TaskBound(

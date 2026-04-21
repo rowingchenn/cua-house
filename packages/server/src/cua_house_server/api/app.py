@@ -131,7 +131,11 @@ def create_app(
         setattr(local_rt, "_cluster_catalog", images)
         # Construct the public lease endpoint URL. Prefer cluster config
         # override; fall back to host_external_ip + default worker port.
-        public_host = host_config.cluster.worker_public_host or host_config.host_external_ip
+        # "auto" is treated as unset so the host_external_ip fallback kicks
+        # in (itself resolved via GCE metadata earlier in the loader).
+        public_host = host_config.cluster.worker_public_host
+        if not public_host or public_host == "auto":
+            public_host = host_config.host_external_ip
         public_port = host_config.cluster.worker_public_port
         lease_endpoint_url = f"http://{public_host}:{public_port}"
         worker_client = WorkerClusterClient(
