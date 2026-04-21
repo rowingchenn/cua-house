@@ -17,7 +17,6 @@ images:
       boot_snapshot: agenthle-dev-cpu-free-agents-baked-20260405
       boot_disk_gb: 64
       default_machine_type: e2-standard-2
-      max_concurrent_vms: 4
 
   cpu-license:
     enabled: true
@@ -37,7 +36,6 @@ images:
       boot_snapshot: agenthle-dev-cpu-licensed-agents-baked-20260405
       boot_disk_gb: 100
       default_machine_type: e2-standard-4
-      max_concurrent_vms: 2
 
   gpu-free:
     enabled: true
@@ -55,7 +53,6 @@ images:
       gpu_type: nvidia-l4
       gpu_count: 1
       default_machine_type: g2-standard-4
-      max_concurrent_vms: 2
 
   cpu-free-ubuntu:
     enabled: true
@@ -75,7 +72,6 @@ images:
       boot_snapshot: agenthle-ubuntu-agents-baked-20260408
       boot_disk_gb: 64
       default_machine_type: e2-standard-4
-      max_concurrent_vms: 4
 
   waa:
     enabled: true
@@ -104,4 +100,3 @@ images:
       gpu_type: nvidia-l4
       gpu_count: 1
       default_machine_type: g2-standard-16
-      max_concurrent_vms: 2

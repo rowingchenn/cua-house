@@ -450,14 +450,50 @@ class GCPVMRuntime:
     def set_images(self, images: dict[str, ImageSpec]) -> None:
         self._images = images
 
+    # gcloud stderr fragments that indicate a transient, retryable error
+    # (quota bursts, API rate limits, 5xx). Anything not matching these is
+    # treated as permanent (bad flags, auth failure, unknown image, etc.).
+    _GCLOUD_TRANSIENT_PATTERNS = (
+        "quota",
+        "rateLimitExceeded",
+        "RATE_LIMIT_EXCEEDED",
+        "resourceExhausted",
+        "RESOURCE_EXHAUSTED",
+        "backendError",
+        "INTERNAL_ERROR",
+        "503",
+        "Service Unavailable",
+        "Too Many Requests",
+    )
+    _GCLOUD_RETRY_DELAYS_S = (5, 15, 45)  # ~65s total across 3 retries
+
     def _run_gcloud(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        # NOTE: subprocess.run blocks the event loop here. Acceptable for now
+        # (retry sleeps add at most ~65s in the transient case) but should
+        # move to async subprocess when this runtime is refactored.
         cmd = [self._gcloud, *args]
-        result = subprocess.run(cmd, text=True, capture_output=True, check=False)
-        if check and result.returncode != 0:
-            raise RuntimeError(
-                f"gcloud failed ({result.returncode}): {' '.join(cmd)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        last_result: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(len(self._GCLOUD_RETRY_DELAYS_S) + 1):
+            result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+            if result.returncode == 0 or not check:
+                return result
+            last_result = result
+            stderr = result.stderr or ""
+            transient = any(p in stderr for p in self._GCLOUD_TRANSIENT_PATTERNS)
+            if not transient or attempt == len(self._GCLOUD_RETRY_DELAYS_S):
+                break
+            delay = self._GCLOUD_RETRY_DELAYS_S[attempt]
+            logger.warning(
+                "gcloud transient failure (attempt %d/%d, sleeping %ds): %s",
+                attempt + 1, len(self._GCLOUD_RETRY_DELAYS_S) + 1, delay,
+                stderr.strip().splitlines()[-1] if stderr.strip() else "(no stderr)",
             )
-        return result
+            time.sleep(delay)
+        assert last_result is not None
+        raise RuntimeError(
+            f"gcloud failed ({last_result.returncode}): {' '.join(cmd)}\n"
+            f"stdout:\n{last_result.stdout}\nstderr:\n{last_result.stderr}"
+        )
 
     async def _run_remote(self, client: httpx.AsyncClient, cua_url: str, command: str) -> dict:
         """Run a command on the guest via CUA API."""

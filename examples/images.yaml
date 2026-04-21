@@ -39,4 +39,3 @@ images:
       boot_snapshot: agenthle-dev-cpu-free-agents-baked-20260405
       boot_disk_gb: 64
       default_machine_type: e2-standard-2
-      max_concurrent_vms: 4

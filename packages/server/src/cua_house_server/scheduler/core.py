@@ -573,11 +573,6 @@ class EnvScheduler:
 
                 # GCP dispatch (on-demand VM creation)
                 if image.gcp and "gcp" in self._runtimes:
-                    active = self._gcp_active_count_locked(candidate.snapshot_name)
-                    if active >= image.max_concurrent_vms:
-                        self._refresh_batch_states_locked()
-                        return  # at GCP capacity, wait
-
                     # Mark STARTING and prepare for async GCP creation
                     candidate.state = TaskState.STARTING
                     candidate.updated_at = utcnow()
@@ -868,14 +863,6 @@ class EnvScheduler:
             if vm.state == VMState.READY and vm.snapshot_name == snapshot_name:
                 return vm
         return None
-
-    def _gcp_active_count_locked(self, snapshot_name: str) -> int:
-        """Count active GCP VMs for a given image key."""
-        count = 0
-        for handle in self._gcp_handles.values():
-            if handle.image_key == snapshot_name:
-                count += 1
-        return count
 
     def _refresh_batch_states_locked(self) -> None:
         for batch in self._batches.values():

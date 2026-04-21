@@ -77,7 +77,6 @@ gpu-free:
     gpu_type: nvidia-l4
     gpu_count: 1
     default_machine_type: g2-standard-4
-    max_concurrent_vms: 2
 ```
 
 - `gcp_boot_image` is preferred over `gcp_boot_snapshot` because creating a VM from an image is significantly faster (~14s vs ~100s).

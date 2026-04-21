@@ -368,7 +368,6 @@ gpu-free:
   gpu_count: 1
   default_vcpus: 4
   default_memory_gb: 16
-  max_concurrent_vms: 2
 ```
 
 Restart cua-house-server to pick up the new config. GCP VMs are created on-demand so no pool restart is needed.

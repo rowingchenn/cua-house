@@ -52,7 +52,6 @@ class GCPImageConfig:
     gpu_type: str | None = None
     gpu_count: int = 0
     default_machine_type: str = "e2-standard-2"
-    max_concurrent_vms: int = 4
 
 
 @dataclass(slots=True)
@@ -171,10 +170,6 @@ class ImageSpec:
     @property
     def gpu_count(self) -> int:
         return self.gcp.gpu_count if self.gcp else 0
-
-    @property
-    def max_concurrent_vms(self) -> int:
-        return self.gcp.max_concurrent_vms if self.gcp else 4
 
 
 @dataclass(slots=True)
@@ -366,7 +361,6 @@ def load_image_catalog(path: str | Path) -> dict[str, ImageSpec]:
                 gpu_type=gcp_raw.get("gpu_type"),
                 gpu_count=int(gcp_raw.get("gpu_count", 0)),
                 default_machine_type=gcp_raw.get("default_machine_type", "e2-standard-2"),
-                max_concurrent_vms=int(gcp_raw.get("max_concurrent_vms", 4)),
             )
 
         catalog[key] = ImageSpec(
