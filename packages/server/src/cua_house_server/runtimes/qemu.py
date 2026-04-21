@@ -551,7 +551,7 @@ class DockerQemuRuntime:
             "--device=/dev/kvm",
             "--cap-add", "NET_ADMIN",
             "-v", f"{handle.storage_dir}:/storage",
-            "-v", f"{self.config.task_data_root}:/shared/agenthle:rw",
+            "-v", f"{self.config.task_data_root}:/data-store:ro",
             "-v", f"{patched_boot}:/run/boot.sh:ro",
             "-p", f"{self.config.vm_bind_address}:{handle.novnc_port}:8006",
         ]
@@ -579,6 +579,26 @@ class DockerQemuRuntime:
         )
         result = self._run(cmd)
         log_path.write_text(result.stdout or "", encoding="utf-8")
+
+        # Fix hairpin NAT for Docker port-mapped traffic.
+        #
+        # dockur's iptables PREROUTING DNAT correctly rewrites dst from the
+        # container IP (172.17.0.2) to the guest IP (172.30.0.2), but the
+        # existing MASQUERADE rule only covers traffic leaving via eth0.
+        # Port-mapped packets are forwarded from eth0 to the internal "docker"
+        # bridge instead, so the guest sees the original source IP (in the
+        # 172.17.0.0/16 Docker subnet) which it cannot route back to.
+        # Adding MASQUERADE on the bridge egress ensures the guest sees its
+        # own gateway (172.30.0.1) as the source and replies route correctly;
+        # conntrack handles the bidirectional NAT reversal automatically.
+        self._run(
+            [
+                "docker", "exec", handle.container_name,
+                "iptables", "-t", "nat", "-A", "POSTROUTING",
+                "-d", "172.30.0.2/32", "-o", "docker", "-j", "MASQUERADE",
+            ],
+            check=False,
+        )
 
     def _ensure_patched_boot_sh(self) -> Path:
         """Patch the Docker image's boot.sh for snapshot support.
