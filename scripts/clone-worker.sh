@@ -262,6 +262,7 @@ run gcloud compute instances create "${INSTANCE_NAME}" \
 # ---------- phase 5: wait for SSH ----------
 step "Waiting for SSH on ${INSTANCE_NAME}"
 INTERNAL_IP="DRY_RUN_INTERNAL_IP"
+EXTERNAL_IP="DRY_RUN_EXTERNAL_IP"
 if (( DRY_RUN == 0 )); then
     for attempt in $(seq 1 24); do
         if gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" \
@@ -274,7 +275,11 @@ if (( DRY_RUN == 0 )); then
     INTERNAL_IP=$(gcloud compute instances describe "${INSTANCE_NAME}" \
         --project="${PROJECT}" --zone="${ZONE}" \
         --format='value(networkInterfaces[0].networkIP)')
+    EXTERNAL_IP=$(gcloud compute instances describe "${INSTANCE_NAME}" \
+        --project="${PROJECT}" --zone="${ZONE}" \
+        --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
     info "internal IP: ${INTERNAL_IP}"
+    info "external IP: ${EXTERNAL_IP}"
 fi
 
 # ---------- phase 6: render + scp artifacts ----------
@@ -319,8 +324,10 @@ END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 step "Summary"
 info "instance:          ${INSTANCE_NAME}"
-info "internal IP:       ${INTERNAL_IP}"
-info "lease_endpoint:    http://${INTERNAL_IP}:8787"
+info "internal IP:       ${INTERNAL_IP}  (VPC-only)"
+info "external IP:       ${EXTERNAL_IP}  (NAT; firewall 8787)"
+info "lease_endpoint:    http://${EXTERNAL_IP}:8787  (resolved from auto @ runtime)"
+info "task url pattern:  http://<port>--<lease>.${EXTERNAL_IP}.sslip.io:8787/"
 info "join token sha256: $(token_fingerprint)"
 info "source snapshot:   ${SOURCE_SNAPSHOT}"
 info "elapsed:           ${ELAPSED}s"

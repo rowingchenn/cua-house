@@ -10,8 +10,17 @@
 # cluster-specific field.
 
 host_id: @@WORKER_ID@@-worker
-host_external_ip: @@INTERNAL_IP@@
-public_base_host: @@INTERNAL_IP@@
+# Let the server resolve both via GCE metadata at startup:
+#   host_external_ip:auto  → the instance's NAT/external IP
+#   public_base_host:auto  → "{external_ip}.sslip.io" (wildcard DNS)
+# Task URLs published back to clients are built as
+#   http://<guest_port>--<lease_id>.<public_base_host>:8787/
+# and routed by the worker's own 8787 FastAPI proxy to the VM's
+# docker-mapped loopback port. Keeping these on "auto" avoids baking
+# the VPC-internal IP (which external clients can't route to) into
+# URLs that agenthle clients running outside the VPC must reach.
+host_external_ip: auto
+public_base_host: auto
 
 # Runtime root must live on XFS with reflink support for instant qcow2
 # copy-on-write. `clone-worker.sh` formats the per-node pd-ssd as XFS
@@ -63,10 +72,12 @@ vm_bind_address: 0.0.0.0
 cluster:
   master_url: @@MASTER_URL@@
   worker_id: @@WORKER_ID@@
-  # The host + port this worker advertises in TaskBound URLs back to
-  # master. Clients use these to reach the worker's HTTP lease API and
-  # the VM service ports directly, bypassing master for the data path.
-  worker_public_host: @@INTERNAL_IP@@
+  # Host + port this worker advertises in TaskBound.lease_endpoint.
+  # Clients hit the HTTP lease API at this URL directly (bypasses master
+  # for the data path). "auto" falls back to host_external_ip above, so
+  # it resolves to the NAT IP at startup — reachable from outside the
+  # VPC as long as `agenthle-allow-env-server` firewall is in place.
+  worker_public_host: auto
   worker_public_port: 8787
   heartbeat_interval_s: 5
   heartbeat_ttl_s: 30
