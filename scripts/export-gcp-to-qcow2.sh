@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # export-gcp-to-qcow2.sh — Export a GCP dev VM's boot disk to qcow2
-# format in GCS staging.
+# format in the template image bucket.
 #
 # Usage:
 #   ./scripts/export-gcp-to-qcow2.sh \
@@ -15,7 +15,7 @@ set -euo pipefail
 PROJECT="sunblaze-4"
 ZONE="us-west1-a"
 DEV_VM_PREFIX="agenthle-dev-"
-STAGING_BUCKET="gs://agenthle/vm-images"
+TEMPLATE_BUCKET="gs://agenthle-images/templates"
 IMAGE_KEY=""
 DATE=""
 DRY_RUN=0
@@ -61,7 +61,7 @@ fi
 DEV_VM="${DEV_VM_PREFIX}${IMAGE_KEY}"
 SNAPSHOT_NAME="agenthle-dev-${IMAGE_KEY}-export-${DATE}"
 IMAGE_NAME="agenthle-dev-${IMAGE_KEY}-export-${DATE}"
-GCS_URI="${STAGING_BUCKET}/${IMAGE_KEY}-${DATE}.qcow2"
+GCS_URI="${TEMPLATE_BUCKET}/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2"
 
 # ---------- helpers ----------
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -86,7 +86,7 @@ info "image_key=${IMAGE_KEY}"
 info "date=${DATE}"
 info "dev_vm=${DEV_VM}"
 info "project=${PROJECT} zone=${ZONE}"
-info "staging_bucket=${STAGING_BUCKET}"
+info "template_bucket=${TEMPLATE_BUCKET}"
 
 if ! command -v gcloud >/dev/null 2>&1; then
     fail "gcloud not in PATH"
@@ -157,11 +157,11 @@ info "image:       ${IMAGE_NAME}"
 info "gcs_uri:     ${GCS_URI}"
 info "elapsed:     ${ELAPSED}s"
 info ""
-info "To download to KVM host:"
+info "To cold-boot test on a KVM host:"
 info "  gsutil cp ${GCS_URI} /mnt/xfs/images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2"
 
 if (( DRY_RUN == 1 )); then
     printf '\n\033[1;33mDRY RUN — no changes made.\033[0m\n'
 else
-    printf '\n\033[1;32mExport complete. qcow2 staged at %s\033[0m\n' "${GCS_URI}"
+    printf '\n\033[1;32mExport complete. qcow2 template written to %s\033[0m\n' "${GCS_URI}"
 fi

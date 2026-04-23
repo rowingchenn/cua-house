@@ -36,7 +36,7 @@ transitions. The script below was used to verify the 2026-04-21
 deployment; adapt the endpoint for future runs:
 
 ```bash
-MASTER=http://<master-ip>:8787
+MASTER=http://<master-dns-or-host>:8787
 B=$(python3 -c 'import uuid;print(uuid.uuid4())')
 T=$(python3 -c 'import uuid;print(uuid.uuid4())')
 curl -sS -X POST $MASTER/v1/batches \

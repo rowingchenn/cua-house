@@ -58,22 +58,55 @@ not apply it automatically.
 gcloud compute instances add-tags cua-house-master --tags=agenthle --zone=us-central1-a
 ```
 
-### Shared task-data storage
+### Per-worker task-data storage
 
-Workers share read-only task-data via a GCE persistent disk + OverlayFS.
-See `docs/deployment/host-setup.md` (section "Multi-node task-data
-sharing") for the exact recipe. In short:
+Each worker owns its own GCE persistent disk for AgentHLE task data. The
+disk is attached to exactly one worker as `device-name=task-data` in
+`READ_WRITE` mode so that the node can refresh it, but during normal VM
+runs it is mounted read-only at `/mnt/agenthle-task-data-ro`. The worker
+uses `/mnt/agenthle-task-data`, an OverlayFS merged view with its writable
+upper layer on `/mnt/xfs`; this is what `task_data_root` points to.
 
-1. A single PD populated from the AgentHLE canonical task-data layout
-   (`gs://agenthle/<domain>/<task>/<variant>/`) attached `READ_ONLY`
-   to every worker. The disk preserves the same relative path under
-   `/mnt/agenthle-task-data-ro/<domain>/<task>/<variant>/`; do not add
-   a `task-data/` prefix inside the bucket or the disk.
-2. Each worker mounts the PD at `/mnt/agenthle-task-data-ro`, a local XFS
-   upper layer at `/mnt/xfs/task-data-upper`, and an OverlayFS merged view
-   at `/mnt/agenthle-task-data` — which is what `task_data_root` points to.
-3. The merged view must be writable by the user running the worker process
-   (e.g. `chown -R weichenzhang:weichenzhang /mnt/agenthle-task-data /mnt/xfs/task-data-upper /mnt/xfs/task-data-work`).
+GCS is the source of truth. Before a worker is manually started, briefly
+remount that node's lower data disk read-write, sync the canonical bucket,
+then remount it read-only and start the worker:
+
+```bash
+cd /opt/cua-house
+./scripts/start-worker.sh
+```
+
+Do not share one task-data disk across workers. The old shared
+read-only-PD + OverlayFS model makes data updates operationally expensive
+because the disk has to be detached from every node before it can be
+updated.
+
+### Persistent paths and reboot-safe addressing
+
+Worker nodes can reboot. Do not store important code or data in
+per-user home directories or temporary directories:
+
+- Code checkout: `/opt/cua-house`, group-writable by the shared
+  `cua-house` group.
+- Host config and secrets: `/etc/cua-house/worker.yaml`,
+  `/etc/cua-house/images.yaml`, `/etc/cua-house/worker.env`.
+- Runtime/cache data: `/mnt/xfs/runtime-cluster`,
+  `/mnt/xfs/snapshot-cache`, `/mnt/xfs/images`.
+- Worker logs: `/var/log/cua-house/worker.log`.
+- Task-data lower disk: `/mnt/agenthle-task-data-ro`.
+- Task-data merged view: `/mnt/agenthle-task-data`.
+- `/tmp` is only for transient scp/bootstrap artifacts and validation
+  output; never make it a source of truth.
+
+Do not hard-code worker IPs in config. `examples/worker.yaml` uses
+`host_external_ip: auto`, `public_base_host: auto`, and
+`cluster.worker_public_host: auto`. For `cluster.master_url`, prefer a
+stable internal DNS name for the master rather than a raw IP, for example:
+
+```yaml
+cluster:
+  master_url: ws://cua-house-master.us-central1-a.c.sunblaze-4.internal:8787/v1/cluster/ws
+```
 
 The worker's startup check (`create_app`'s worker branch) will refuse to
 start if `task_data_root` is missing or unwritable — catches the mount
@@ -95,9 +128,9 @@ export CUA_HOUSE_CLUSTER_JOIN_TOKEN=$(openssl rand -hex 32)
 
 ```yaml
 host_id: cua-house-master
-host_external_ip: <master internal IP, e.g. 10.128.0.16>
-public_base_host: <same>
-runtime_root: /home/weichen/cua-house-mnc/runtime
+host_external_ip: auto
+public_base_host: auto
+runtime_root: /var/lib/cua-house/master-runtime
 task_data_root: null            # master doesn't host task data
 docker_image: trycua/cua-qemu-windows:latest
 host_reserved_vcpus: 1
@@ -118,15 +151,30 @@ cluster:
 Note: master mode does not require `snapshot_cache_dir` — master never
 provisions VMs.
 
-### Worker config (`kvm02-worker.yaml`)
+### Worker config (`/etc/cua-house/worker.yaml`)
+
+Do not hand-maintain divergent worker YAMLs. New workers are rendered
+from [`examples/worker.yaml`](../../examples/worker.yaml) by
+[`scripts/clone-worker.sh`](../../scripts/clone-worker.sh). For existing
+workers, keep the common fields aligned with that template; the only
+per-node values should be identity and addressing:
+
+- `host_id`
+- `cluster.worker_id`
+- `cluster.master_url`
+- Optional explicit `host_external_ip`, `public_base_host`, or
+  `cluster.worker_public_host` if `auto` is not suitable.
+
+The current template uses `auto` for public host fields so most workers
+only need `@@WORKER_ID@@` and `@@MASTER_URL@@` rendered.
 
 ```yaml
-host_id: kvm-02-worker
-host_external_ip: <worker internal IP, e.g. 10.128.0.14>
-public_base_host: <same>
+host_id: <worker-id>-worker
+host_external_ip: auto
+public_base_host: auto
 runtime_root: /mnt/xfs/runtime-cluster    # separate from standalone runtime_root
 snapshot_cache_dir: /mnt/xfs/snapshot-cache   # REQUIRED: persistent XFS for reflink
-task_data_root: /mnt/agenthle-task-data   # the OverlayFS merged view
+task_data_root: /mnt/agenthle-task-data   # OverlayFS view over per-worker RO data disk
 docker_image: trycua/cua-qemu-windows:latest
 host_reserved_vcpus: 2
 host_reserved_memory_gb: 8
@@ -139,12 +187,14 @@ novnc_port_range: [18000, 18999]
 mode: worker
 vm_bind_address: 0.0.0.0                   # publish VM ports to all IFs
 cluster:
-  master_url: ws://<master IP>:8787/v1/cluster/ws
-  worker_id: kvm02                         # unique identifier
-  worker_public_host: 10.128.0.14          # advertised in TaskAssignment URLs
+  master_url: ws://<master internal DNS>:8787/v1/cluster/ws
+  worker_id: <worker-id>                   # unique identifier
+  worker_public_host: auto
   worker_public_port: 8787
   heartbeat_interval_s: 5
   heartbeat_ttl_s: 30
+  reconnect_min_backoff_s: 1
+  reconnect_max_backoff_s: 30
 ```
 
 ### Images catalog
@@ -176,13 +226,15 @@ Start master first, then any number of workers.
 ### Master
 
 ```bash
-cd ~/cua-house-mnc
+cd /opt/cua-house
 export CUA_HOUSE_CLUSTER_JOIN_TOKEN=...
+sudo mkdir -p /var/lib/cua-house/master-runtime /var/log/cua-house
+sudo chown "$(id -u):$(id -g)" /var/lib/cua-house/master-runtime /var/log/cua-house
 setsid nohup uv run python -m cua_house_server.cli \
   --host-config master-server.yaml \
   --image-catalog images.yaml \
   --host 0.0.0.0 --port 8787 --mode master \
-  </dev/null >master.log 2>&1 &
+  </dev/null >/var/log/cua-house/master.log 2>&1 &
 disown
 curl -sS http://127.0.0.1:8787/healthz    # {"status":"ok","mode":"master"}
 ```
@@ -198,16 +250,8 @@ script does not start the worker process.
 **To start a worker manually** on an already-provisioned host:
 
 ```bash
-cd ~/cua-house-mnc
-set -a
-source <(sudo cat /etc/cua-house/worker.env)
-set +a
-setsid nohup uv run python -m cua_house_server.cli \
-  --host-config /etc/cua-house/worker.yaml \
-  --image-catalog /etc/cua-house/images.yaml \
-  --host 0.0.0.0 --port 8787 --mode worker \
-  </dev/null >worker.log 2>&1 &
-disown
+cd /opt/cua-house
+./scripts/start-worker.sh
 ```
 
 In either path, verify the worker registered with master:
@@ -299,7 +343,8 @@ mode now fails fast in `create_app` if the directory is missing or not
 writable by the current user. Fix with:
 
 ```bash
-sudo chown -R $(id -un):$(id -gn) /mnt/agenthle-task-data /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
+sudo chown -R $(id -un):$(id -gn) /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
+sudo chown $(id -un):$(id -gn) /mnt/agenthle-task-data
 ```
 
 ### 6. `CUA_HOUSE_CLUSTER_JOIN_TOKEN` mismatch

@@ -24,10 +24,10 @@ workers.
 |---|---|
 | Process start | Manual `setsid nohup uv run ... --mode worker`; clone/bootstrap does not install or start a systemd unit. |
 | Config path | `/etc/cua-house/worker.yaml` + `/etc/cua-house/worker.env` (mode 0600), written by `scripts/clone-worker.sh`. |
-| Repo location | `/home/weichenzhang/cua-house-mnc` baked into the boot disk. `~/cua-house` may still exist but is the legacy standalone checkout. |
+| Repo location | `/opt/cua-house`, group-writable by the shared `cua-house` group. Personal home directories are legacy migration sources only. |
 | Example config file | `examples/worker.yaml` with `@@...@@` placeholders rendered by the clone script. |
 | Image catalog | `examples/images.yaml` or `packages/server/src/cua_house_server/config/defaults/images.yaml`; master and workers both load it. Workers prewarm enabled local templates from GCS at startup. |
-| Task-data disk | `agenthle-nested-kvm-01-task-data` attached read-only to every worker. Do not create a new task-data disk per worker. |
+| Task-data disk | One GCE PD per worker, attached only to that worker as `device-name=task-data`. It is normally mounted read-only at `/mnt/agenthle-task-data-ro`; `/mnt/agenthle-task-data` is an OverlayFS view with writes on `/mnt/xfs`. |
 | Pool | Removed. There is no `/v1/cluster/pool`, no desired pool spec, no `ADD_IMAGE`, and no `ADD_VM`. Master assigns tasks directly with `AssignTask`. |
 
 ## Prerequisites
@@ -35,13 +35,13 @@ workers.
 Before running the clone script:
 
 1. **Master is running** and reachable:
-   `curl http://<master-ip>:8787/v1/cluster/status`.
+   `curl http://<master-dns-or-host>:8787/v1/cluster/status`.
 2. **Cluster join token is shared.** The same
    `CUA_HOUSE_CLUSTER_JOIN_TOKEN` value must be used by master and
    workers. Pass it with `--join-token`.
 3. **`gcloud` authenticated** to project `sunblaze-4`. Check with
    `gcloud auth list` and `gcloud config get-value project`.
-4. **Local cua-house-mnc checkout is current.** The script reads
+4. **Local cua-house checkout is current.** The script reads
    `examples/worker.yaml`, `examples/images.yaml` (or the default
    catalog), and `scripts/_clone-worker-bootstrap.sh`.
 5. **Image catalog is in sync with master.** Master uses the catalog to
@@ -66,7 +66,7 @@ export CUA_HOUSE_CLUSTER_JOIN_TOKEN=<secret>   # same value master has
 ./scripts/clone-worker.sh \
     --new-id kvm04 \
     --source-instance agenthle-nested-kvm-02 \
-    --master-url ws://10.128.0.16:8787/v1/cluster/ws \
+    --master-url ws://cua-house-master.us-central1-a.c.sunblaze-4.internal:8787/v1/cluster/ws \
     --join-token "$CUA_HOUSE_CLUSTER_JOIN_TOKEN"
 ```
 
@@ -85,6 +85,13 @@ Flags worth knowing:
   worker. This is non-disruptive.
 - `--source-boot-snapshot NAME` reuses an existing golden snapshot and
   skips the snapshot step.
+- `--task-data-source-snapshot NAME` creates the new worker's task-data
+  disk from a current snapshot, then `start-worker.sh` syncs only the
+  GCS delta at startup. If omitted, the disk starts empty and the first
+  startup performs a full bucket sync.
+- `--task-data-size-gb` defaults to `400`. Keep this sized for task data
+  only; VM image templates belong in `gs://agenthle-images/templates`,
+  not the task-data bucket.
 - `--dry-run` prints every `gcloud` and SSH command without executing.
 
 The script phases are idempotent:
@@ -99,7 +106,7 @@ create boot disk from snapshot (pd-ssd, 500 GB)
 create fresh per-node XFS disk (pd-ssd, 512 GB)
   |
 create GCE instance (tags=agenthle, nested virt, Cascade Lake,
-                     boot+xfs+task-data disks attached)
+                     boot+xfs+per-worker task-data disks attached)
   |
 wait for SSH ready
   |
@@ -121,22 +128,17 @@ manually:
 gcloud compute ssh agenthle-nested-kvm-04 \
     --project=sunblaze-4 --zone=us-central1-a
 
-cd /home/weichenzhang/cua-house-mnc
-set -a
-source <(sudo cat /etc/cua-house/worker.env)
-set +a
-
-setsid nohup uv run python -m cua_house_server.cli \
-  --host-config /etc/cua-house/worker.yaml \
-  --image-catalog /etc/cua-house/images.yaml \
-  --host 0.0.0.0 --port 8787 --mode worker \
-  </dev/null >worker.log 2>&1 &
-disown
+cd /opt/cua-house
+./scripts/start-worker.sh
 ```
 
-Worker startup prewarms all enabled local templates from GCS before it
-registers with master. If the XFS image directory is empty, this may
-take minutes and progress will be in `worker.log`.
+`scripts/start-worker.sh` first remounts this node's own task-data disk
+read-write, syncs `gs://agenthle` to `/mnt/agenthle-task-data-ro`, returns
+the disk to read-only mode, restores the OverlayFS view, then starts the
+worker process with `setsid nohup`. Worker startup also prewarms all enabled
+local templates from GCS before it registers with master. If the data or
+image directories are cold, this may take minutes and progress will be
+in the terminal and `/var/log/cua-house/worker.log`.
 
 ## Validation
 
@@ -206,6 +208,11 @@ gcloud compute disks create ${NEW}-xfs \
     --project=$PROJECT --zone=$ZONE \
     --type=pd-ssd --size=512GB
 
+gcloud compute disks create ${NEW}-task-data \
+    --project=$PROJECT --zone=$ZONE \
+    --source-snapshot=<current-task-data-snapshot> \
+    --type=pd-balanced --size=400GB
+
 gcloud compute instances create $NEW \
     --project=$PROJECT --zone=$ZONE \
     --machine-type=n2-standard-16 \
@@ -215,7 +222,7 @@ gcloud compute instances create $NEW \
     --min-cpu-platform="Intel Cascade Lake" \
     --disk=name=$NEW,boot=yes,auto-delete=yes,mode=rw \
     --disk=name=${NEW}-xfs,device-name=xfs,mode=rw,auto-delete=yes \
-    --disk=name=agenthle-nested-kvm-01-task-data,device-name=task-data,mode=ro \
+    --disk=name=${NEW}-task-data,device-name=task-data,mode=rw,auto-delete=yes \
     --metadata=cua-house-worker-id=${NEW#agenthle-nested-},cua-house-master-url=<ws url>
 
 gcloud compute scp \
@@ -241,18 +248,22 @@ gcloud compute ssh $NEW --project=$PROJECT --zone=$ZONE \
    Compare the logged `sha256_prefix` with the master token.
 5. **Port conflict with leftover manual process** - bootstrap runs
    `pkill -9 -f cua_house_server.cli` before validation.
-6. **Task-data disk attached read-write** - the shared task-data disk
-   must be `mode=ro`.
+6. **Task-data disk ownership** - do not attach one task-data disk to
+   multiple workers. Each worker needs its own task-data disk, normally
+   mounted read-only during VM runs.
 7. **Unformatted XFS disk** - bootstrap handles `blkid || mkfs.xfs`.
 8. **Nested virtualization missing** - without `/dev/kvm`, VM boots time
    out around `ready_timeout_s=900`.
 9. **VPC mismatch** - workers and master must share `agenthle-vpc`.
-10. **Legacy repo path** - use `/home/weichenzhang/cua-house-mnc`, not
-    `~/cua-house`.
+10. **Legacy repo path** - use `/opt/cua-house`, not a personal
+    home-directory checkout. Bootstrap may migrate a baked legacy
+    checkout into `/opt/cua-house`, but new SOPs should not depend on
+    user home paths.
 11. **Image catalog drift** - workers prewarm from their own
     `/etc/cua-house/images.yaml`; keep it in sync with master.
 12. **Startup appears slow** - template prewarm happens before worker
-    registration. Tail `worker.log` for `template_pulled` and
+    registration. Tail `/var/log/cua-house/worker.log` for
+    `template_pulled` and
     `prewarm completed`.
 
 ## Teardown
@@ -267,8 +278,9 @@ When you no longer need a worker:
 gcloud compute ssh agenthle-nested-kvm-04 \
     --command='pkill -f cua_house_server.cli || true'
 
-# 3. Delete the GCE instance. --delete-disks=boot,data keeps the
-#    shared task-data disk intact.
+# 3. Delete the GCE instance. With the clone script's default
+#    auto-delete settings this deletes the boot, XFS, and per-worker
+#    task-data disks.
 gcloud compute instances delete agenthle-nested-kvm-04 \
     --zone=us-central1-a \
     --delete-disks=boot,data

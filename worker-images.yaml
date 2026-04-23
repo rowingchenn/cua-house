@@ -1,0 +1,33 @@
+images:
+  cpu-free:
+    enabled: true
+    os_family: windows
+    published_ports: [5000]
+    local:
+      template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260421.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260421.qcow2
+      version: "20260421"
+      default_cpu_cores: 4
+      default_memory_gb: 8
+
+  cpu-free-ubuntu:
+    enabled: true
+    os_family: linux
+    published_ports: [5000]
+    local:
+      template_qcow2_path: /mnt/xfs/images/cpu-free-ubuntu/cpu-free-ubuntu-20260421.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260421.qcow2
+      version: "20260421"
+      default_cpu_cores: 4
+      default_memory_gb: 8
+
+  cpu-license:
+    enabled: true
+    os_family: windows
+    published_ports: [5000]
+    local:
+      template_qcow2_path: /mnt/xfs/images/cpu-license/cpu-license-20260421.qcow2
+      gcs_uri: gs://agenthle-images/templates/cpu-license/cpu-license-20260421.qcow2
+      version: "20260421"
+      default_cpu_cores: 4
+      default_memory_gb: 16

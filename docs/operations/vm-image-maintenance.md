@@ -10,14 +10,16 @@ How to update the Windows VM images used by cua-house. There are two image types
 
 | Image key | qcow2 file | GCS object (baked) | Bake date | Description |
 |-----------|-----------|--------------------|-----------|-------------|
-| `cpu-free` | `cpu-free-20260413.qcow2` | `gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2` | 2026-04-13 (re-bake w/ savevm) | **Active** (kvm-02) — Re-baked on kvm-02 because the prior 2026-04-06 blob in GCS had no savevm tag, so any pool using `-loadvm cpu-free` failed at QEMU start (pitfall #17). Guest content unchanged from the 2026-04-06 bake. |
+| `cpu-free` | `cpu-free-20260413.qcow2` | `gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2` | 2026-04-13 (re-bake w/ savevm) | **Active** (kvm-02) — Re-baked on kvm-02 because the prior 2026-04-06 blob in GCS had no savevm tag, so any runtime using `-loadvm cpu-free` failed at QEMU start (pitfall #17). Guest content unchanged from the 2026-04-06 bake. |
 | `cpu-free-ubuntu` | `cpu-free-ubuntu-20260408.qcow2` | `gs://agenthle-images/templates/cpu-free-ubuntu/cpu-free-ubuntu-20260408.qcow2` | 2026-04-09 (re-bake w/ cifs-utils) | **Active** — Ubuntu 22.04 with CUA server + agents (Claude Code, OpenClaw, Codex). Re-baked on kvm-02 after the original 2026-04-08 19:33 bake was found to be missing `cifs-utils` (pitfall #13). |
 | `waa` | `waa-20260408.qcow2` | `gs://agenthle-images/templates/waa/waa-20260408.qcow2` | 2026-04-10 | **Active** (kvm-02) — Windows Agent Arena environment. Ships its own server on port 5000 (not cua-computer-server) but exposes the same `/status` interface. Baked via QEMU monitor `savevm` on kvm-02. |
 | `cpu-license` | `cpu-license-20260405.qcow2` | *(not uploaded)* | 2026-04-05 | Not yet updated with bridge changes. |
 
 > **Source of truth for local templates is GCS**, not any particular KVM host. The cua-house-server's `prewarm_templates()` auto-pulls from the `gcs_uri` in `images.yaml` at worker startup, so any new node gets the current baked version for free. After **any** local re-bake, you MUST upload the new qcow2 back to GCS (`gsutil cp ...`) or future nodes will pull a stale version and either fail `-loadvm` or hit already-fixed guest-side bugs.
 >
-> On kvm-02 the images live on `/mnt/xfs/images/{image_key}/` (XFS+reflink) and are accessed through the `/home/weichenzhang/agenthle-env-images → /mnt/xfs/images` symlink so the same `template_qcow2_path` in `images.yaml` resolves on both legacy (kvm0) and current (kvm-02) hosts without per-host config drift.
+> On current workers the images live on `/mnt/xfs/images/{image_key}/`
+> (XFS+reflink). Keep `template_qcow2_path` under `/mnt/xfs/images` so
+> workers can share the same `images.yaml` without per-host path drift.
 
 ---
 
@@ -109,25 +111,24 @@ gcloud compute images create agenthle-dev-${IMAGE_KEY}-export-${DATE} \
 gcloud compute images export \
     --image=agenthle-dev-${IMAGE_KEY}-export-${DATE} \
     --export-format=qcow2 \
-    --destination-uri=gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2 \
+    --destination-uri=gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2 \
     --project=sunblaze-4
 
-# 3. Copy to kvm0
-# Run on kvm0 (or use gsutil from kvm0 directly):
-gsutil cp gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2 \
-    /home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+# 3. Copy to a KVM worker for cold-boot validation
+gsutil cp gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2 \
+    /mnt/xfs/images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 ```
 
 > Note: `gcloud compute images export` uses Cloud Build and takes a few minutes. Check progress with `gcloud builds list --project=sunblaze-4`.
 
-### Step 3: Test on kvm0 (cold boot, no server involvement)
+### Step 3: Test on a KVM worker (cold boot, no server involvement)
 
-On kvm0, start a temporary container to verify the image boots correctly:
+On a KVM worker, start a temporary container to verify the image boots correctly:
 
 ```bash
 DATE=20260405
 IMAGE_KEY=cpu-free
-QCOW2=/home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+QCOW2=/mnt/xfs/images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 
 # Copy to a temp working dir
 mkdir -p /tmp/vm-test/storage
@@ -462,7 +463,7 @@ The cold boot and savevm workflow is the same as Windows (see Steps 3-4 above), 
 
 ```bash
 # Generate patched boot.sh via server code
-cd /home/weichenzhang/cua-house
+cd /opt/cua-house
 uv run python3 -c '
 from cua_house_server.config.loader import load_host_runtime_config
 from cua_house_server.runtimes.qemu import DockerQemuRuntime
@@ -476,7 +477,7 @@ docker run -d --name ubuntu-bake \
     --device=/dev/kvm \
     --cap-add NET_ADMIN \
     -v /tmp/bake/storage:/storage \
-    -v /home/weichenzhang/agenthle-env-runtime/boot-patched.sh:/run/boot.sh:ro \
+    -v /opt/cua-house/runtime/boot-patched.sh:/run/boot.sh:ro \
     -p 127.0.0.1:16000:5000 \
     -e RAM_SIZE=8G -e CPU_CORES=4 -e CPU_MODEL=host -e HV=N \
     -e 'ARGUMENTS=-qmp tcp:0.0.0.0:7200,server,nowait' \
@@ -497,8 +498,8 @@ docker exec ubuntu-bake bash -c 'echo savevm cpu-free-ubuntu | timeout 120 nc lo
 
 ### Image storage
 
-All images (Windows and Ubuntu) stored on the dedicated 512 GB image disk:
+All worker images are stored on the worker XFS disk:
 
-- Mount: `/mnt/agenthle-env-images` (ext4, label `agenthle-images`)
-- Symlink: `/home/weichenzhang/agenthle-env-images` → `/mnt/agenthle-env-images`
-- Disk: `agenthle-nested-kvm-01-images` (pd-balanced, us-central1-a)
+- Mount: `/mnt/xfs`
+- Directory: `/mnt/xfs/images/<image-key>/<image-key>-<date>.qcow2`
+- Catalog field: `local.template_qcow2_path`

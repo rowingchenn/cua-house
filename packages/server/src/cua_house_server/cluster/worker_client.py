@@ -14,7 +14,8 @@ Startup sequence:
 
 * Sweep stale snapshot cache entries (fingerprint mismatch)
 * Pull all enabled image templates in parallel. A pull failure raises
-  out of `start()` → lifespan → uvicorn exits → systemd/docker restart.
+  out of `start()` → lifespan → uvicorn exits. Operators restart the
+  worker manually after fixing the underlying issue.
 * Dial master, send Register, begin send/recv loops.
 
 Reconnect uses exponential backoff. On reconnect the client re-sends

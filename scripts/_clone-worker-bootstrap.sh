@@ -16,6 +16,35 @@
 set -euo pipefail
 
 log() { printf '[bootstrap %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+WORKER_USER="${CUA_HOUSE_WORKER_USER:-$(id -un)}"
+WORKER_GROUP="$(id -gn "${WORKER_USER}")"
+WORKER_HOME="$(getent passwd "${WORKER_USER}" | cut -d: -f6)"
+SHARED_GROUP="${CUA_HOUSE_SHARED_GROUP:-cua-house}"
+REPO_DIR="${CUA_HOUSE_REPO_DIR:-/opt/cua-house}"
+
+log "ensuring shared group ${SHARED_GROUP}"
+sudo groupadd -f "${SHARED_GROUP}"
+sudo usermod -aG "${SHARED_GROUP}" "${WORKER_USER}" || true
+
+if [[ ! -d "${REPO_DIR}" ]]; then
+    for legacy in "${WORKER_HOME}/cua-house-mnc" "${WORKER_HOME}/cua-house"; do
+        if [[ -d "${legacy}" ]]; then
+            log "migrating legacy checkout ${legacy} -> ${REPO_DIR}"
+            sudo mkdir -p "$(dirname "${REPO_DIR}")"
+            sudo cp -a "${legacy}" "${REPO_DIR}"
+            break
+        fi
+    done
+fi
+if [[ ! -d "${REPO_DIR}" ]]; then
+    log "FATAL: ${REPO_DIR} not found and no legacy checkout found under ${WORKER_HOME}"
+    exit 1
+fi
+sudo chown -R "${WORKER_USER}:${SHARED_GROUP}" "${REPO_DIR}"
+sudo chmod -R g+rwX "${REPO_DIR}"
+sudo mkdir -p /var/log/cua-house
+sudo chown -R "${WORKER_USER}:${SHARED_GROUP}" /var/log/cua-house
+sudo chmod -R g+rwX /var/log/cua-house
 
 # ---------- 1. XFS disk format (idempotent) ----------
 XFS_DEV="/dev/disk/by-id/google-xfs"
@@ -34,8 +63,8 @@ fi
 
 # ---------- 2. fstab entries (idempotent) ----------
 # The XFS mount uses LABEL= so mkfs.xfs above picks it up regardless of
-# what the cloned fstab had. task-data-ro is the shared RO PD, overlay
-# is the merged view cua-house reads at /mnt/agenthle-task-data.
+# what the cloned fstab had. task-data is a per-worker PD normally
+# mounted read-only; OverlayFS gives the worker a writable merged view.
 ensure_fstab() {
     local line="$1"
     if ! grep -qxF "${line}" /etc/fstab; then
@@ -64,24 +93,31 @@ mount_if_unmounted() {
 }
 
 mount_if_unmounted /mnt/xfs
-mount_if_unmounted /mnt/agenthle-task-data-ro
 
-# overlayfs upper + work dirs must exist on XFS before the overlay can
-# mount. Create them NOW, between xfs mount and overlay mount.
-#
-# /mnt/xfs/images also has to exist because /home/weichenzhang/agenthle-env-images
-# is a symlink to it (baked into the cloned boot disk). The worker's
-# worker startup prewarm will auto-populate it from GCS; we only need
-# the dir to exist so the symlink resolves.
+TASK_DATA_DEV="/dev/disk/by-id/google-task-data"
+if [[ ! -e "${TASK_DATA_DEV}" ]]; then
+    log "FATAL: ${TASK_DATA_DEV} not present. Check that the instance was created with --disk=device-name=task-data."
+    exit 1
+fi
+if sudo blkid "${TASK_DATA_DEV}" >/dev/null 2>&1; then
+    log "task-data disk already formatted"
+else
+    log "formatting ${TASK_DATA_DEV} as ext4"
+    sudo mkfs.ext4 -F "${TASK_DATA_DEV}"
+fi
+
+# /mnt/xfs/images is where workers prewarm qcow2 templates from GCS.
 sudo mkdir -p /mnt/xfs/task-data-upper /mnt/xfs/task-data-work \
               /mnt/xfs/runtime-cluster /mnt/xfs/images
 
+mount_if_unmounted /mnt/agenthle-task-data-ro
 mount_if_unmounted /mnt/agenthle-task-data
 
 # ---------- 3. Ownership (worker user needs write on task-data + xfs) ----------
-log "chown /mnt/xfs + task-data layers to weichenzhang"
-sudo chown -R weichenzhang:weichenzhang /mnt/xfs
-sudo chown weichenzhang:weichenzhang /mnt/agenthle-task-data || true
+log "chown /mnt/xfs + overlay task-data to ${WORKER_USER}"
+sudo chown -R "${WORKER_USER}:${SHARED_GROUP}" /mnt/xfs
+sudo chmod -R g+rwX /mnt/xfs
+sudo chown "${WORKER_USER}:${SHARED_GROUP}" /mnt/agenthle-task-data || true
 
 # ---------- 4. Stale slot cleanup ----------
 # A cloned boot disk may carry slot dirs from the source node. Their
@@ -92,28 +128,30 @@ log "wiping stale runtime-cluster slots"
 sudo rm -rf /mnt/xfs/runtime-cluster/slots
 # legacy home-dir runtime from the baked standalone config - also wipe
 # if present so it doesn't confuse a poking operator.
-if [[ -d /home/weichenzhang/cua-house-mnc/runtime/slots ]]; then
-    sudo -u weichenzhang rm -rf /home/weichenzhang/cua-house-mnc/runtime/slots || true
-fi
+for legacy_slots in "${REPO_DIR}/runtime/slots" "${WORKER_HOME}/cua-house-mnc/runtime/slots" "${WORKER_HOME}/cua-house/runtime/slots"; do
+    if [[ -d "${legacy_slots}" ]]; then
+        sudo -u "${WORKER_USER}" rm -rf "${legacy_slots}" || true
+    fi
+done
 
 # ---------- 5. Kill any stale nohup cua-house processes ----------
 # The boot snapshot was taken while kvm02 was running. pkill here is
 # idempotent - if there's nothing matching, it returns non-zero which
 # we swallow.
 log "killing stale cua_house_server processes (if any)"
-sudo pkill -9 -f cua_house_server.cli || true
+pgrep -f "[c]ua_house_server.cli" | xargs -r sudo kill -9 || true
 
 # ---------- 6. uv sync on the baked repo ----------
-# The boot snapshot carries /home/weichenzhang/cua-house-mnc at whatever
+# The boot snapshot carries the worker checkout at whatever
 # state the source node had. If it's a git clone, try to pull latest;
 # if it was scp'd in (as kvm02 was during the initial cluster deploy),
 # there's no git remote and we just uv sync what's there. Either way
 # uv sync is cheap when nothing changed.
-log "uv sync in /home/weichenzhang/cua-house-mnc (git pull if possible)"
-sudo -u weichenzhang bash -c '
+log "uv sync in ${REPO_DIR} (git pull if possible)"
+sudo -u "${WORKER_USER}" env REPO_DIR="${REPO_DIR}" bash -c '
     set -e
     export PATH=$HOME/.local/bin:$PATH
-    cd /home/weichenzhang/cua-house-mnc
+    cd "${REPO_DIR}"
     if [[ -d .git ]]; then
         git fetch --quiet origin 2>&1 | tail -3 || true
         git pull --ff-only --quiet 2>&1 | tail -3 || \
@@ -135,6 +173,12 @@ for f in worker.yaml images.yaml; do
         rm -f /tmp/${f}
     fi
 done
+if [[ -f /tmp/start-worker.sh ]]; then
+    sudo mkdir -p "${REPO_DIR}/scripts"
+    sudo install -m 0755 -o "${WORKER_USER}" -g "${SHARED_GROUP}" /tmp/start-worker.sh \
+        "${REPO_DIR}/scripts/start-worker.sh"
+    rm -f /tmp/start-worker.sh
+fi
 if [[ -f /tmp/worker.env ]]; then
     sudo install -m 0600 -o root -g root /tmp/worker.env /etc/cua-house/worker.env
     rm -f /tmp/worker.env
@@ -144,10 +188,10 @@ fi
 # Use the --print-register-frame path to catch typos before the operator
 # starts the worker manually.
 log "validating config via --print-register-frame"
-sudo -u weichenzhang bash -c '
+sudo -u "${WORKER_USER}" env REPO_DIR="${REPO_DIR}" bash -c '
     set -e
     export PATH=$HOME/.local/bin:$PATH
-    cd /home/weichenzhang/cua-house-mnc
+    cd "${REPO_DIR}"
     # worker.env holds CUA_HOUSE_CLUSTER_JOIN_TOKEN; export it for the
     # dry run so the token-provenance log fires on the right code path.
     if [[ -r /etc/cua-house/worker.env ]]; then
@@ -168,7 +212,5 @@ sudo -u weichenzhang bash -c '
 
 log "bootstrap complete; worker was not started"
 log "manual start:"
-log "  cd /home/weichenzhang/cua-house-mnc"
-log "  set -a; source <(sudo cat /etc/cua-house/worker.env); set +a"
-log "  setsid nohup uv run python -m cua_house_server.cli --host-config /etc/cua-house/worker.yaml --image-catalog /etc/cua-house/images.yaml --host 0.0.0.0 --port 8787 --mode worker </dev/null >worker.log 2>&1 &"
-log "  disown"
+log "  cd ${REPO_DIR}"
+log "  ./scripts/start-worker.sh"

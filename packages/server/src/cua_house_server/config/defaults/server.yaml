@@ -1,8 +1,8 @@
 host_id: local-host-01
 host_external_ip: auto
 public_base_host: auto
-runtime_root: /home/weichenzhang/agenthle-env-runtime
-snapshot_cache_dir: /home/weichenzhang/agenthle-snapshot-cache
+runtime_root: /mnt/xfs/runtime
+snapshot_cache_dir: /mnt/xfs/snapshot-cache
 task_data_root: /mnt/agenthle-task-data
 docker_image: trycua/cua-qemu-windows:latest
 host_reserved_vcpus: 2

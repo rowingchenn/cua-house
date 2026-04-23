@@ -78,7 +78,7 @@ images:
     os_family: windows
     published_ports: [5000, 9222, 8080]
     local:
-      template_qcow2_path: /home/weichenzhang/agenthle-env-images/waa/waa-20260408.qcow2
+      template_qcow2_path: /mnt/xfs/images/waa/waa-20260408.qcow2
       gcs_uri: gs://agenthle-images/templates/waa/waa-20260408.qcow2
       version: "20260408"
       default_vcpus: 4

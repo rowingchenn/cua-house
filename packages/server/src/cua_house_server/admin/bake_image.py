@@ -259,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu-cores", type=int, default=4)
     parser.add_argument("--memory-gb", type=int, default=16)
     parser.add_argument("--remote-host", default="local-host-01")
-    parser.add_argument("--golden-dir", default="/home/weichenzhang/agenthle-env-images/cpu-free")
+    parser.add_argument("--golden-dir", default="/mnt/xfs/images/cpu-free")
     parser.add_argument("--bridge-root", default=str(_default_bridge_root()))
     parser.add_argument("--skip-freeze", action="store_true")
     parser.add_argument("--preserve-on-error", action="store_true")
@@ -630,7 +630,7 @@ def freeze_overlay(
     golden_dir: str,
 ) -> dict[str, str]:
     golden_path = f"{golden_dir}/golden.qcow2"
-    slot_root = f"/home/weichenzhang/agenthle-env-runtime/slots/{slot_id}"
+    slot_root = f"/mnt/xfs/runtime/slots/{slot_id}"
     container_name = f"cua-house-env-{slot_id}"
     ts = time.strftime("%Y%m%d-%H%M%S")
     new_golden_tmp = f"{golden_dir}/golden.qcow2.bake-{ts}.tmp"

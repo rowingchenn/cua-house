@@ -11,7 +11,7 @@ Procedure for updating VM images (cpu-free, cpu-license, cpu-free-ubuntu, waa) i
 ## Prerequisites
 
 - `gcloud` authenticated to project `sunblaze-4`
-- `gsutil` access to `gs://agenthle-images/` and `gs://agenthle/vm-images/`
+- `gsutil` access to `gs://agenthle-images/templates/`
 - SSH access to at least one KVM host (agenthle-nested-kvm-02, kvm-03, etc.)
 - Master cluster running and healthy (`GET /v1/cluster/workers` returns 200)
 - KVM image storage on a reflink-capable filesystem (current workers use XFS at `/mnt/xfs`). Cold-boot tests must use the same reflink slot layout as the worker runtime, not a full `cp` into `/tmp`.
@@ -70,7 +70,7 @@ Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
 
 Then shut down cleanly (Linux: `sudo shutdown -h now`, Windows: `shutdown /s /t 0`).
 
-## Step 2: Export boot disks to qcow2 staging
+## Step 2: Export boot disks directly to the template bucket
 
 ```bash
 DATE=$(date +%Y%m%d)
@@ -79,7 +79,11 @@ IMAGE_KEY=cpu-free
 ./scripts/export-gcp-to-qcow2.sh --image-key ${IMAGE_KEY} --date ${DATE}
 ```
 
-This creates `gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2` via Cloud Build. For a batch update, run independent image exports in parallel. Each export creates a GCP snapshot, a temporary GCE image, and a staging qcow2 object.
+This creates `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2` via Cloud Build. For a batch update, run independent image exports in parallel. Each export creates a GCP snapshot, a temporary GCE image, and a qcow2 template object.
+
+Never export qcow2 images to `gs://agenthle`. That bucket is the worker
+task-data source; every worker mirrors it into its own 400G task-data disk
+during manual startup.
 
 If the dev VM name or zone does not match the script defaults, run the same steps manually:
 
@@ -92,7 +96,7 @@ DISK=agenthle-ubuntu
 
 SNAPSHOT_NAME=agenthle-dev-${IMAGE_KEY}-export-${DATE}
 IMAGE_NAME=agenthle-dev-${IMAGE_KEY}-export-${DATE}
-GCS_URI=gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2
+GCS_URI=gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 
 gcloud compute disks snapshot "${DISK}" \
   --project="${PROJECT}" --zone="${ZONE}" \
@@ -118,10 +122,10 @@ gcloud builds describe <build-id> --project=sunblaze-4 --region=us-central1 \
   --format='value(status,finishTime)'
 ```
 
-After each export succeeds, verify that the staging object exists and record its size:
+After each export succeeds, verify that the template object exists and record its size:
 
 ```bash
-gsutil stat gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2 | \
+gsutil stat gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2 | \
   awk '/Creation time|Content-Length/ {print}'
 ```
 
@@ -140,11 +144,12 @@ gcloud compute ssh "${KVM}" --zone=us-central1-a --project=sunblaze-4 -- '
   DATE='"${DATE}"'
   BASE=/mnt/xfs/images/${IMAGE_KEY}
   TEMPLATE=${BASE}/${IMAGE_KEY}-${DATE}.qcow2
+  GCS_TEMPLATE=gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
   TEST_ROOT=/mnt/xfs/image-update-tests/${IMAGE_KEY}-${DATE}
   SLOT=${TEST_ROOT}/storage
 
   mkdir -p "${BASE}" "${SLOT}" "${TEST_ROOT}/logs"
-  gsutil cp "gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2" "${TEMPLATE}"
+  gsutil cp "${GCS_TEMPLATE}" "${TEMPLATE}"
 
   # Match DockerQemuRuntime._prepare_vm(): reflink on XFS, full copy only
   # if the filesystem cannot reflink. Keep test files on /mnt/xfs.
@@ -195,28 +200,29 @@ After the reflink cold-boot test passes, you can prewarm cache on one or more wo
 
 Do not manually bake `savevm` into the base template.
 
-## Step 4: Publish to GCS source of truth
+## Step 4: Verify GCS source of truth
 
 ```bash
 IMAGE_KEY=cpu-free
 DATE=$(date +%Y%m%d)
-STAGING=gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2
 TEMPLATE=gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
 
-# Server-side GCS copy; do not re-upload hundreds of GB from the KVM host.
-gsutil cp "${STAGING}" "${TEMPLATE}"
-
-# Verify size parity.
-gsutil stat "${STAGING}" "${TEMPLATE}" | awk '/gs:|Content-Length/ {print}'
+# Verify the exported template object.
+gsutil stat "${TEMPLATE}" | awk '/gs:|Creation time|Content-Length/ {print}'
 ```
 
-Publishing to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2` is **required** -- workers prewarm templates from GCS at startup (`prewarm_templates()`). Skipping this means new workers get a stale image.
+Exporting to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2` is **required** -- workers prewarm templates from GCS at startup (`prewarm_templates()`). Skipping this means new workers get a stale image.
 
-Only publish images that passed the KVM cold-boot `/status` test. Keep failed staging objects for debugging or delete them after root cause is understood.
+Only advance `images.yaml` to images that passed the KVM cold-boot
+`/status` test. Keep failed template objects for debugging or delete them
+after root cause is understood.
 
 ## Step 5: Sync task data (if changed)
 
-If you added or modified task data (input files, software, reference data), sync the canonical AgentHLE GCS prefix to the shared task-data disk. The source of truth is `gs://agenthle/<domain>/<task>/<variant>/`, mirrored to `/mnt/agenthle-task-data/<domain>/<task>/<variant>/`. The bucket path should match `TaskDataRequest.source_relpath` exactly.
+If you added or modified task data (input files, software, reference
+data), upload it to the canonical AgentHLE GCS prefix first. The source
+of truth is `gs://agenthle/<domain>/<task>/<variant>/`; the bucket path
+must match `TaskDataRequest.source_relpath` exactly.
 
 **Single-node (standalone):**
 
@@ -225,25 +231,23 @@ gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
   /mnt/agenthle-task-data/<domain>/<task>/<variant>/
 ```
 
-**Multi-node (cluster):** The shared persistent disk (`agenthle-nested-kvm-01-task-data`) is attached read-only to all workers. To update:
+**Multi-node (cluster):** Each worker owns its own task-data disk. Do not
+detach one disk from multiple workers for data updates. The normal manual start command
+syncs `gs://agenthle` into that worker's lower data disk, remounts it
+read-only, restores the OverlayFS view, and starts the worker:
 
 ```bash
-# 1. Detach the PD from all workers (or schedule during maintenance window)
-# 2. Attach RW to a single node and rsync
-gcloud compute instances attach-disk <node> \
-    --disk=agenthle-nested-kvm-01-task-data --device-name=task-data --mode=rw \
-    --zone=us-central1-a --project=sunblaze-4
-gcloud compute ssh <node> -- \
-    'sudo mount /dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro && \
-     sudo mkdir -p /mnt/agenthle-task-data-ro/<domain>/<task>/<variant> && \
-     gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
-       /mnt/agenthle-task-data-ro/<domain>/<task>/<variant>/ && \
-     sudo umount /mnt/agenthle-task-data-ro'
-
-# 3. Re-attach RO to workers (or restart workers — clone-worker.sh handles this)
+cd /opt/cua-house
+./scripts/start-worker.sh
 ```
 
-Alternatively, each worker's OverlayFS upper layer can absorb incremental writes during task execution. For bulk data updates, the PD rsync path above is cleaner.
+If you need to refresh a worker's disk without starting the worker, run
+the sync portion of `scripts/start-worker.sh` manually: unmount the
+OverlayFS view, mount `/dev/disk/by-id/google-task-data` read-write at
+`/mnt/agenthle-task-data-ro`, run `gcloud storage rsync --recursive
+--exclude='(^|/)vm-images/|.*\.gstmp$' gs://agenthle
+/mnt/agenthle-task-data-ro`, unmount it, and remount it `ro,noload`
+before restoring the overlay.
 
 ## Step 6: Update images.yaml
 
@@ -257,10 +261,10 @@ Example diff for `cpu-free`:
     os_family: windows
     published_ports: [5000]
     local:
--     template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260413.qcow2
+-     template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260413.qcow2
 -     gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260413.qcow2
 -     version: "20260413"
-+     template_qcow2_path: /home/weichenzhang/agenthle-env-images/cpu-free/cpu-free-20260415.qcow2
++     template_qcow2_path: /mnt/xfs/images/cpu-free/cpu-free-20260415.qcow2
 +     gcs_uri: gs://agenthle-images/templates/cpu-free/cpu-free-20260415.qcow2
 +     version: "20260415"
       default_vcpus: 4
@@ -275,23 +279,15 @@ git commit -am "images: bump cpu-free to 20260415"
 git push
 
 # On each KVM worker:
-cd /path/to/cua-house && git pull
+cd /opt/cua-house && git pull
 pkill -f cua_house_server.cli || true
-set -a
-source <(sudo cat /etc/cua-house/worker.env)
-set +a
-setsid nohup uv run python -m cua_house_server.cli \
-  --host-config /etc/cua-house/worker.yaml \
-  --image-catalog /etc/cua-house/images.yaml \
-  --host 0.0.0.0 --port 8787 --mode worker \
-  </dev/null >worker.log 2>&1 &
-disown
+./scripts/start-worker.sh
 ```
 
 ```bash
 # Option B: Provision new workers (handles instance, mounts, config, validation)
 scripts/clone-worker.sh --new-id kvm04 --source-instance agenthle-nested-kvm-02 \
-  --master-url ws://<master-ip>:8787/v1/cluster/ws \
+  --master-url ws://<master-dns>:8787/v1/cluster/ws \
   --join-token "$CUA_HOUSE_CLUSTER_JOIN_TOKEN"
 ```
 
@@ -305,7 +301,7 @@ Checklist:
 4. Smoke batch completes end-to-end
 
 ```bash
-MASTER=http://<master-ip>:8787
+MASTER=http://<master-dns-or-host>:8787
 
 # Check worker status, live capacity, and cached shapes
 curl -sS ${MASTER}/v1/cluster/workers | python3 -m json.tool

@@ -297,8 +297,8 @@ class DockerQemuRuntime:
         """Pull every enabled local image's template in parallel.
 
         Runs at worker startup before the WS Register. Any failure raises
-        and propagates to the caller so the process can fail-fast (systemd
-        / docker restart then retries). Idempotent per-image pull, so
+        and propagates to the caller so the manually started worker
+        process can fail fast. Idempotent per-image pull, so
         re-runs after a partial previous run only fetch what's missing.
         """
         targets = [

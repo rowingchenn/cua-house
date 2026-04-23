@@ -119,7 +119,7 @@ def create_app(
             if not td.exists():
                 raise RuntimeError(
                     f"worker mode: task_data_root {td} does not exist. "
-                    f"Did you mount the shared task-data disk?"
+                    f"Did you mount the per-worker task-data OverlayFS view?"
                 )
             if not os.access(td, os.W_OK):
                 raise RuntimeError(

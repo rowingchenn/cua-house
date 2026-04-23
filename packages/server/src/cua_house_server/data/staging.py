@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import shlex
 import subprocess
 import tempfile
 import zipfile
@@ -107,6 +108,7 @@ class TaskDataManager:
         try:
             if use_symlink_inject:
                 result = await self._stage_symlink_inject(
+                    lease_id=lease_id,
                     cua_url=cua_url,
                     task_data=task_data,
                     phase=phase,
@@ -156,6 +158,7 @@ class TaskDataManager:
     async def _stage_symlink_inject(
         self,
         *,
+        lease_id: str,
         cua_url: str,
         task_data: TaskRequirement.TaskDataRequest,
         phase: PhaseName,
@@ -179,30 +182,39 @@ class TaskDataManager:
         rel = task_data.source_relpath
         smb = self._SMB_SHARE_DIR
         is_linux = os_family == "linux"
+        q_rel = shlex.quote(rel)
+        q_smb = shlex.quote(smb)
+        q_smb_rel = shlex.quote(f"{smb}/agenthle/{rel}")
 
         if phase == "runtime":
             # Clear prior task's symlinks and recreate the path structure
-            self._container_exec(container_name, f"rm -rf {smb}/agenthle && mkdir -p {smb}/agenthle")
-            self._container_exec(container_name, f"mkdir -p '{smb}/agenthle/{rel}'")
+            self._container_exec(container_name, f"rm -rf {q_smb}/agenthle && mkdir -p {q_smb}/agenthle")
+            self._container_exec(container_name, f"mkdir -p {q_smb_rel}")
 
             # Symlink input/ (required)
             self._container_exec(
                 container_name,
-                f"ln -sf '/data-store/{rel}/input' '{smb}/agenthle/{rel}/input'",
+                f"ln -sf /data-store/{q_rel}/input {q_smb_rel}/input",
             )
 
             # Symlink software/ (optional)
             if task_data.software_dir:
                 self._container_exec(
                     container_name,
-                    f"ln -sf '/data-store/{rel}/software' '{smb}/agenthle/{rel}/software'",
+                    f"ln -sf /data-store/{q_rel}/software {q_smb_rel}/software",
                 )
 
-            # Create real output dir (writable, not a symlink)
+            # Output must be lease-scoped. Two concurrent leases can run the
+            # same source_relpath on the same worker, so never expose
+            # /data-store/{rel}/output directly. /storage is the VM slot mount;
+            # destroy_vm removes it with the lease.
             if task_data.remote_output_dir:
+                output_root = f"/storage/cua-house-lease-output/{lease_id}/{rel}/output"
+                q_output_root = shlex.quote(output_root)
                 self._container_exec(
                     container_name,
-                    f"mkdir -p '{smb}/agenthle/{rel}/output'",
+                    f"rm -rf {q_output_root} && mkdir -p {q_output_root} && "
+                    f"ln -sfn {q_output_root} {q_smb_rel}/output",
                 )
 
             # Map the Samba share inside the guest
@@ -217,13 +229,17 @@ class TaskDataManager:
                 source_relpath=rel,
                 input_dir=task_data.input_dir,
                 software_dir=task_data.software_dir,
+                output_dir=(
+                    f"/storage/cua-house-lease-output/{lease_id}/{rel}/output"
+                    if task_data.remote_output_dir else None
+                ),
             )
 
         else:  # eval
             # Symlink reference/ so evaluator can access answer data
             self._container_exec(
                 container_name,
-                f"ln -sf '/data-store/{rel}/reference' '{smb}/agenthle/{rel}/reference'",
+                f"ln -sf /data-store/{q_rel}/reference {q_smb_rel}/reference",
             )
             self.event_logger.emit(
                 "task_data_reference_unlocked",

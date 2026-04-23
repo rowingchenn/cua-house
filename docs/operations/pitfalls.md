@@ -180,40 +180,56 @@ mount helper verify `mountpoint -q` after the mount command. Otherwise the
 shell can end with a later successful command and staging appears successful
 even though the mount failed.
 
-### 14. ext4 read-only multi-attach needs `noload` mount option
+### 14. ext4 read-only task-data lower mount needs `noload`
 
-**Symptom**: `mount -o ro` fails on a GCP persistent disk attached in READ_ONLY mode to multiple VMs.
+**Symptom**: `mount -o ro` fails on a worker's task-data disk after it
+was temporarily mounted read-write for GCS sync.
 
-**Root cause**: ext4 tries to replay the journal on first mount, which requires write access. A disk that was previously mounted read-write has a dirty journal.
+**Root cause**: ext4 tries to replay the journal on first read-only
+mount, which requires write access. A disk that was previously mounted
+read-write for sync can have a dirty journal.
 
-**Fix**: Mount with `mount -o ro,noload` to skip journal replay. Data integrity is guaranteed because the disk is read-only anyway.
+**Fix**: Mount the lower disk with `mount -o ro,noload` after sync.
+`scripts/start-worker.sh` does this before restoring the OverlayFS view.
 
-### 15. Agents need writable task data, but multi-attach PD is read-only
+### 15. Agents need writable task data, but the lower PD is read-only
 
-**Symptom**: Agent task fails with "Permission denied" when creating `output/` under `/media/user/data/agenthle/...`. The shared task-data disk is mounted RO (required for multi-attach), so Samba/CIFS writes fail.
+**Symptom**: Agent task fails with "Permission denied" when creating
+`output/` under `/media/user/data/agenthle/...`.
 
-**Root cause**: GCP standard PDs only support multi-attach in READ_ONLY mode. To share a single data disk across multiple KVM nodes, we lose write ability. But task execution requires agents to write `output/` files.
+**Root cause**: In cluster mode the per-worker task-data PD is normally
+mounted read-only at `/mnt/agenthle-task-data-ro`. Task execution must
+not mutate that lower disk; it exists only to mirror `gs://agenthle`.
 
-**Fix**: Use OverlayFS on each node — shared RO disk as `lowerdir`, local XFS dir as `upperdir`. Reads pass through to the shared disk (no duplication); writes land on the local upper layer. See `docs/deployment/host-setup.md` → "Multi-node setup".
+**Fix**: Use OverlayFS on each node: the per-worker RO mount is
+`lowerdir`, and `/mnt/xfs/task-data-upper` is `upperdir`. Reads pass
+through to the synced data disk; writes land on local XFS. See
+`docs/deployment/host-setup.md` -> "Multi-node setup".
 
-### 16. OverlayFS upper layer persists across VM reverts
+### 16. Output must be lease-scoped, not task-scoped
 
-**Symptom**: Re-running the same task (re-submitting via the client, or
-retrying through `retry_count` on disconnect) shows stale files in
-`output/` from a previous run.
+**Symptom**: Two concurrent leases for the same task on one worker see
+or overwrite each other's `output/` files. A later retry can also see
+stale output from an earlier run.
 
-**Root cause**: Output files are written from the guest through Samba
-to `/data-store/{rel}/output` on the worker host. `/data-store` is the
-read-only mount of the shared task-data disk; the writable `output/`
-lives in the OverlayFS upper layer, which persists across VM
-destroy/provision. A re-run of the same task sees the old upper-layer
-content.
+**Root cause**: The task-data source path (`source_relpath`) is shared
+by every lease of that task. If writable output is exposed as
+`/data-store/{rel}/output` or as a task-scoped host path, concurrent
+leases collide. Guest VM deletion only removes the VM slot/container; it
+does not imply that a shared task-data path is safe to delete.
 
-**Fix**: Task staging recreates the task's directory structure and
-wipes `output/` on each runtime phase (`_stage_symlink_inject` in
-`packages/server/src/cua_house_server/data/staging.py`). If a new task
-does NOT go through that staging phase (e.g. manual debug), purge
-`{task_data_root_upper}/{rel}/output/` yourself.
+**Fix**: Runtime staging exposes `input/`, `software/`, and `reference/`
+from the read-only task-data mount, but exposes `output/` from a
+lease-scoped VM slot path:
+`/storage/cua-house-lease-output/<lease_id>/<source_relpath>/output`.
+The guest still sees the conventional
+`agenthle/<source_relpath>/output` path through Samba, but two leases get
+different backing directories. `destroy_vm()` removes the slot directory,
+so the lease output is cleaned up with the VM.
+
+Historical files under `/mnt/xfs/task-data-upper` can still exist from
+older runs or manual debug. Do not rely on VM deletion to remove those;
+clean them only when no leases are running on the worker.
 
 ---
 
@@ -277,7 +293,10 @@ Remaining improvements to consider:
 
 **Root cause**: Docker `-p` flag in `_start_vm_container` binds to `self.config.vm_bind_address` (default `127.0.0.1`). In standalone mode this is intentional — clients reach VMs only through master's reverse proxy on the same host. In cluster mode clients connect directly to the worker across the VPC, so the loopback binding blocks them.
 
-**Fix**: Set `vm_bind_address: 0.0.0.0` in the worker's `server.yaml`. Worker restart re-creates containers with the new binding. Network-level access control is delegated to VPC firewall rules (`agenthle-allow-vm-ports`, 10.0.0.0/8).
+**Fix**: Set `vm_bind_address: 0.0.0.0` in `/etc/cua-house/worker.yaml`.
+Worker restart re-creates containers with the new binding. Network-level
+access control is delegated to VPC firewall rules
+(`agenthle-allow-vm-ports`, 10.0.0.0/8).
 
 ### 22. `task_data_root` unwritable by the worker user
 
@@ -285,11 +304,19 @@ Remaining improvements to consider:
 
 **Root cause**: OverlayFS upper layer (`/mnt/xfs/task-data-upper`) and merged view are commonly created `root:root` during host provisioning. The cua-house process runs as an unprivileged user.
 
-**Fix**: `sudo chown -R $(id -un):$(id -gn) /mnt/agenthle-task-data /mnt/xfs/task-data-upper /mnt/xfs/task-data-work`. The worker mode startup check catches this before the first task runs.
+**Fix**: recursively chown only the OverlayFS upper/work dirs:
+`sudo chown -R $(id -un):$(id -gn) /mnt/xfs/task-data-upper /mnt/xfs/task-data-work`.
+Then chown the merged mount point itself without recursion:
+`sudo chown $(id -un):$(id -gn) /mnt/agenthle-task-data`. The worker mode startup check catches this before the first task runs.
 
 ### 23. Worker WS reconnect backoff after master restart
 
-**Symptom**: After `master.log` shows a new `INFO: Uvicorn running...`, the workers' `worker.log` keeps printing `Worker WS disconnected: received 1012 (service restart)` and `Connect call failed (<master ip>, 8787)` for ~30–60s before recovering. `/v1/cluster/workers` on master returns `[]` during the window.
+**Symptom**: After `/var/log/cua-house/master.log` shows a new `INFO: Uvicorn running...`,
+the workers' `/var/log/cua-house/worker.log` keeps printing
+`Worker WS disconnected: received 1012 (service restart)` and
+`Connect call failed (<master host>, 8787)` for ~30-60s before
+recovering. `/v1/cluster/workers` on master returns `[]` during the
+window.
 
 **Behavior**: This is normal exponential backoff. Two back-to-back master restarts compound the backoff. No action needed — each worker's reconnect supervisor waits `min(reconnect_min_backoff_s * 2^n + jitter, reconnect_max_backoff_s)` between attempts. Master has no persistent pool state to restore (ephemeral-VM model); workers just start accepting new `AssignTask` messages as they arrive.
 
@@ -313,4 +340,4 @@ Between READY and the worker finishing `destroy_vm` (typically a few seconds: `d
 
 **Root cause**: The GCE boot-disk snapshot `scripts/clone-worker.sh` uses is taken **live** from a running source worker (kvm02). If that worker had any in-flight slots at snapshot time, the slot directories under `/mnt/xfs/runtime-cluster/slots/` are frozen into the snapshot. `cleanup_orphaned_state()` on the cloned worker kills docker containers with matching names (safe), but it does **not** touch the `slots/` directories — those are pure host filesystem state.
 
-**Fix**: Done in `scripts/_clone-worker-bootstrap.sh` — the post-SSH bootstrap block unconditionally `rm -rf`s `/mnt/xfs/runtime-cluster/slots` and the legacy `~/cua-house-mnc/runtime/slots` (if present) before the worker is started manually. If you run a manual clone without the bootstrap script, you **must** perform this cleanup yourself or the first `AssignTask` will hit surprising failures.
+**Fix**: Done in `scripts/_clone-worker-bootstrap.sh` — the post-SSH bootstrap block unconditionally `rm -rf`s `/mnt/xfs/runtime-cluster/slots` and legacy checkout runtime slots before the worker is started manually. If you run a manual clone without the bootstrap script, you **must** perform this cleanup yourself or the first `AssignTask` will hit surprising failures.

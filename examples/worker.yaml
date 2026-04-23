@@ -9,7 +9,7 @@
 # docs/deployment/cluster.md for the architecture context of every
 # cluster-specific field.
 
-host_id: @@WORKER_ID@@-worker
+host_id: "@@WORKER_ID@@-worker"
 # Let the server resolve both via GCE metadata at startup:
 #   host_external_ip:auto  → the instance's NAT/external IP
 #   public_base_host:auto  → "{external_ip}.sslip.io" (wildcard DNS)
@@ -24,20 +24,19 @@ public_base_host: auto
 
 # Runtime root must live on XFS with reflink support for instant qcow2
 # copy-on-write. `clone-worker.sh` formats the per-node pd-ssd as XFS
-# and labels it `xfs-@@WORKER_ID@@` before the service starts.
+# and labels it `agenthle-xfs` before the service starts.
 runtime_root: /mnt/xfs/runtime-cluster
 
 # Persistent snapshot cache (same XFS volume). Required. Survives worker
 # restarts; purge on image-version bumps per docs/operations/vm-image-maintenance.md.
 snapshot_cache_dir: /mnt/xfs/snapshot-cache
 
-# Shared OverlayFS view - the lower layer is the read-only
-# agenthle-nested-kvm-01-task-data disk (attached RO to every worker),
-# the upper layer is per-node on /mnt/xfs/task-data-upper. The bootstrap
-# script installs fstab entries and mounts the merged view at
-# /mnt/agenthle-task-data before the worker is started manually. See
-# docs/deployment/host-setup.md §"Multi-node task-data sharing" for the
-# exact mount recipe.
+# Per-worker task-data view. Each worker owns its own GCE PD, but the PD
+# is normally mounted read-only at /mnt/agenthle-task-data-ro. The worker
+# reads/writes /mnt/agenthle-task-data, an OverlayFS view whose writable
+# upper layer lives on /mnt/xfs. scripts/start-worker.sh temporarily
+# remounts the per-worker PD read-write to sync gs://agenthle, then
+# returns it to read-only before starting the worker.
 task_data_root: /mnt/agenthle-task-data
 
 docker_image: trycua/cua-qemu-windows:latest
@@ -70,8 +69,10 @@ mode: worker
 vm_bind_address: 0.0.0.0
 
 cluster:
-  master_url: @@MASTER_URL@@
-  worker_id: @@WORKER_ID@@
+  # Prefer stable internal DNS for the master instead of a raw IP, e.g.
+  # ws://cua-house-master.us-central1-a.c.sunblaze-4.internal:8787/v1/cluster/ws
+  master_url: "@@MASTER_URL@@"
+  worker_id: "@@WORKER_ID@@"
   # Host + port this worker advertises in TaskBound.lease_endpoint.
   # Clients hit the HTTP lease API at this URL directly (bypasses master
   # for the data path). "auto" falls back to host_external_ip above, so

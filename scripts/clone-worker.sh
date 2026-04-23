@@ -6,7 +6,7 @@
 #   ./scripts/clone-worker.sh \
 #       --new-id kvm04 \
 #       --source-instance agenthle-nested-kvm-02 \
-#       --master-url ws://10.128.0.16:8787/v1/cluster/ws \
+#       --master-url ws://cua-house-master.us-central1-a.c.sunblaze-4.internal:8787/v1/cluster/ws \
 #       --join-token "$CUA_HOUSE_CLUSTER_JOIN_TOKEN"
 #
 # See docs/deployment/clone-worker.md for the full runbook, including
@@ -23,9 +23,10 @@ ZONE="us-central1-a"
 VPC="agenthle-vpc"
 MACHINE_TYPE="n2-standard-16"
 XFS_SIZE_GB=512
+TASK_DATA_SIZE_GB=400
+TASK_DATA_SOURCE_SNAPSHOT=""
 BOOT_DISK_SIZE_GB=500
 BOOT_DISK_TYPE="pd-ssd"
-TASK_DATA_DISK="agenthle-nested-kvm-01-task-data"
 SOURCE_INSTANCE=""
 SOURCE_SNAPSHOT=""
 NEW_ID=""
@@ -41,15 +42,15 @@ Usage: $0 --new-id <ID> --master-url <URL> --join-token <TOKEN> \\
           (--source-instance <NAME> | --source-boot-snapshot <NAME>) \\
           [--machine-type n2-standard-16] \\
           [--project sunblaze-4] [--zone us-central1-a] [--vpc agenthle-vpc] \\
-          [--xfs-size-gb 512] \\
-          [--task-data-disk agenthle-nested-kvm-01-task-data] \\
+          [--xfs-size-gb 512] [--task-data-size-gb 400] \\
+          [--task-data-source-snapshot SNAPSHOT] \\
           [--dry-run]
 
 Required or prompted:
   --new-id <ID>              GCE instance suffix + cluster worker_id,
                              e.g. kvm04. Must be unique in both GCE and
                              master's WorkerRegistry.
-  --master-url <URL>         ws://master-internal-ip:8787/v1/cluster/ws.
+  --master-url <URL>         ws://<stable-master-dns>:8787/v1/cluster/ws.
                              If omitted in a TTY, the script prompts.
   --join-token <TOKEN>       shared CUA_HOUSE_CLUSTER_JOIN_TOKEN.
                              If omitted, the script uses the env var or
@@ -82,7 +83,8 @@ while [[ $# -gt 0 ]]; do
         --zone)                 ZONE="$2"; shift 2 ;;
         --vpc)                  VPC="$2"; shift 2 ;;
         --xfs-size-gb)          XFS_SIZE_GB="$2"; shift 2 ;;
-        --task-data-disk)       TASK_DATA_DISK="$2"; shift 2 ;;
+        --task-data-size-gb)    TASK_DATA_SIZE_GB="$2"; shift 2 ;;
+        --task-data-source-snapshot) TASK_DATA_SOURCE_SNAPSHOT="$2"; shift 2 ;;
         --dry-run)              DRY_RUN=1; shift ;;
         -h|--help)              usage; exit 0 ;;
         *)                      echo "unknown arg: $1" >&2; usage; exit 2 ;;
@@ -96,7 +98,7 @@ if [[ -z "${MASTER_URL}" && -n "${CUA_HOUSE_MASTER_URL:-}" ]]; then
     MASTER_URL="${CUA_HOUSE_MASTER_URL}"
 fi
 if [[ -z "${MASTER_URL}" && -t 0 ]]; then
-    read -r -p "Master WebSocket URL (ws://<master-ip>:8787/v1/cluster/ws): " MASTER_URL
+    read -r -p "Master WebSocket URL (ws://<stable-master-dns>:8787/v1/cluster/ws): " MASTER_URL
 fi
 if [[ -z "${JOIN_TOKEN}" && -n "${CUA_HOUSE_CLUSTER_JOIN_TOKEN:-}" ]]; then
     JOIN_TOKEN="${CUA_HOUSE_CLUSTER_JOIN_TOKEN}"
@@ -135,6 +137,7 @@ fi
 INSTANCE_NAME="agenthle-nested-${INSTANCE_SUFFIX}"
 BOOT_DISK_NAME="${INSTANCE_NAME}"
 XFS_DISK_NAME="${INSTANCE_NAME}-xfs"
+TASK_DATA_DISK_NAME="${INSTANCE_NAME}-task-data"
 # Master base URL for HTTP ops (strip ws:// + path).
 MASTER_HTTP="${MASTER_URL#ws://}"
 MASTER_HTTP="http://${MASTER_HTTP%/v1/cluster/ws}"
@@ -211,8 +214,9 @@ fi
 WORKER_TEMPLATE="${REPO_ROOT}/examples/worker.yaml"
 IMAGES_CATALOG="${REPO_ROOT}/examples/images.yaml"
 BOOTSTRAP_FILE="${SCRIPT_DIR}/_clone-worker-bootstrap.sh"
+START_WORKER_FILE="${SCRIPT_DIR}/start-worker.sh"
 
-for f in "${WORKER_TEMPLATE}" "${BOOTSTRAP_FILE}"; do
+for f in "${WORKER_TEMPLATE}" "${BOOTSTRAP_FILE}" "${START_WORKER_FILE}"; do
     [[ -f "${f}" ]] || fail "missing required template/file: ${f}"
 done
 if [[ ! -f "${IMAGES_CATALOG}" ]]; then
@@ -245,6 +249,17 @@ run gcloud compute disks create "${XFS_DISK_NAME}" \
     --project="${PROJECT}" --zone="${ZONE}" \
     --type=pd-ssd --size="${XFS_SIZE_GB}GB"
 
+step "Creating fresh per-worker task-data disk"
+TASK_DATA_CREATE_ARGS=(
+    gcloud compute disks create "${TASK_DATA_DISK_NAME}"
+    --project="${PROJECT}" --zone="${ZONE}"
+    --type=pd-balanced --size="${TASK_DATA_SIZE_GB}GB"
+)
+if [[ -n "${TASK_DATA_SOURCE_SNAPSHOT}" ]]; then
+    TASK_DATA_CREATE_ARGS+=(--source-snapshot="${TASK_DATA_SOURCE_SNAPSHOT}")
+fi
+run "${TASK_DATA_CREATE_ARGS[@]}"
+
 # ---------- phase 4: create instance ----------
 step "Creating GCE instance ${INSTANCE_NAME}"
 run gcloud compute instances create "${INSTANCE_NAME}" \
@@ -256,7 +271,7 @@ run gcloud compute instances create "${INSTANCE_NAME}" \
     --min-cpu-platform=Intel\ Cascade\ Lake \
     --disk="name=${BOOT_DISK_NAME},boot=yes,auto-delete=yes,mode=rw" \
     --disk="name=${XFS_DISK_NAME},device-name=xfs,mode=rw,auto-delete=yes" \
-    --disk="name=${TASK_DATA_DISK},device-name=task-data,mode=ro" \
+    --disk="name=${TASK_DATA_DISK_NAME},device-name=task-data,mode=rw,auto-delete=yes" \
     --metadata="cua-house-worker-id=${NEW_ID},cua-house-master-url=${MASTER_URL}"
 
 # ---------- phase 5: wait for SSH ----------
@@ -303,6 +318,7 @@ chmod 600 "${RENDERED_DIR}/worker.env"
 
 cp "${IMAGES_CATALOG}" "${RENDERED_DIR}/images.yaml"
 cp "${BOOTSTRAP_FILE}" "${RENDERED_DIR}/clone-worker-bootstrap.sh"
+cp "${START_WORKER_FILE}" "${RENDERED_DIR}/start-worker.sh"
 
 step "scp artifacts to ${INSTANCE_NAME}:/tmp/"
 run gcloud compute scp \
@@ -311,6 +327,7 @@ run gcloud compute scp \
     "${RENDERED_DIR}/images.yaml" \
     "${RENDERED_DIR}/worker.env" \
     "${RENDERED_DIR}/clone-worker-bootstrap.sh" \
+    "${RENDERED_DIR}/start-worker.sh" \
     "${INSTANCE_NAME}":/tmp/
 
 # ---------- phase 7: remote bootstrap ----------
@@ -330,18 +347,14 @@ info "lease_endpoint:    http://${EXTERNAL_IP}:8787  (resolved from auto @ runti
 info "task url pattern:  http://<port>--<lease>.${EXTERNAL_IP}.sslip.io:8787/"
 info "join token sha256: $(token_fingerprint)"
 info "source snapshot:   ${SOURCE_SNAPSHOT}"
+info "task data disk:    ${TASK_DATA_DISK_NAME}"
+info "task data source:  ${TASK_DATA_SOURCE_SNAPSHOT:-empty disk; start-worker syncs from GCS}"
 info "elapsed:           ${ELAPSED}s"
 info ""
 info "manual start on worker:"
 info "  gcloud compute ssh ${INSTANCE_NAME} --project=${PROJECT} --zone=${ZONE}"
-info "  cd /home/weichenzhang/cua-house-mnc"
-info "  set -a; source <(sudo cat /etc/cua-house/worker.env); set +a"
-info "  setsid nohup uv run python -m cua_house_server.cli \\"
-info "    --host-config /etc/cua-house/worker.yaml \\"
-info "    --image-catalog /etc/cua-house/images.yaml \\"
-info "    --host 0.0.0.0 --port 8787 --mode worker \\"
-info "    </dev/null >worker.log 2>&1 &"
-info "  disown"
+info "  cd /opt/cua-house"
+info "  ./scripts/start-worker.sh"
 info ""
 info "verify after manual start:"
 info "  curl -sS ${MASTER_HTTP}/v1/cluster/workers | python3 -m json.tool"

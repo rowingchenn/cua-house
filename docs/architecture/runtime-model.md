@@ -44,8 +44,7 @@ Each image variant (e.g. `cpu-free`) has a versioned template qcow2
 created offline. It holds a clean, fully-installed OS with CUA server
 and agent tooling — **no pre-baked snapshot tags**. Workers prewarm
 all enabled templates in parallel from GCS at startup before joining
-the cluster; pull failures fail-fast the process (systemd / docker
-restarts).
+the cluster; pull failures fail-fast the manually started worker process.
 
 Location on host: configured via `template_qcow2_path` in the image
 catalog YAML (typically `/mnt/xfs/images/<image>/<image>-<date>.qcow2`).
@@ -131,8 +130,10 @@ and deleted by `GCPVMRuntime.cleanup_orphaned_state` at startup.
 ## Task data isolation
 
 `/data-store:ro` mount + symlink injection: every container gets
-`/data-store` mounted read-only over the shared task-data tree. At
-staging time the scheduler selectively symlinks the task's
+`/data-store` mounted read-only over the worker's task-data root. In
+cluster mode that root is an OverlayFS view over this worker's own
+read-only task-data disk, with runtime writes landing on `/mnt/xfs`.
+At staging time the scheduler selectively symlinks the task's
 `input/`, `software/`, and `reference/` (eval phase only) directories
 into the container's Samba-served path (`/tmp/smb/agenthle/{rel}/`).
 The guest sees only those directories — anything not symlinked simply

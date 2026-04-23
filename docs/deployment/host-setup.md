@@ -7,7 +7,7 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 > see [cluster.md](cluster.md). A worker node is identical to a
 > standalone host except:
 >
-> - `mode: worker` in `server.yaml` and a `cluster:` section pointing
+> - `mode: worker` in `/etc/cua-house/worker.yaml` and a `cluster:` section pointing
 >   at the master
 > - `vm_bind_address: 0.0.0.0` so VM ports are reachable across the VPC
 > - `snapshot_cache_dir` set to a persistent XFS path (cache survives
@@ -16,7 +16,7 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 > In cluster mode the worker provisions a fresh VM per master-dispatched
 > `AssignTask` and destroys it on task completion — there is no static
 > pool to configure. Everything below (filesystem layout, OverlayFS
-> task-data sharing, images.yaml, docker image) applies unchanged.
+> task-data layout, images.yaml, docker image) applies unchanged.
 
 ## Host requirements
 
@@ -32,12 +32,12 @@ How to set up a KVM host to run cua-house-server with Docker+QEMU local runtime.
 
 | Path | Purpose |
 |------|---------|
-| `{runtime_root}/` | Runtime state: per-VM disks, logs, events. Configured in `server.yaml`. |
+| `{runtime_root}/` | Runtime state: per-VM disks, logs, events. Configured in the host YAML. |
 | `{runtime_root}/slots/` | Per-VM directories (storage/ and logs/) |
 | `{runtime_root}/events.jsonl` | Structured JSONL event log |
 | `{runtime_root}/boot-patched.sh` | Auto-generated patched boot script for snapshot support |
 | `{image_root}/cpu-free-YYYYMMDD.qcow2` | Versioned template qcow2. Configured per image in `images.yaml`; shape-specific savevm tags are created automatically on first cache miss. |
-| `{task_data_root}/` | Task data mount point. Configured in `server.yaml`. |
+| `{task_data_root}/` | Task data mount point. Configured in the host YAML. |
 
 Example (XFS setup — images and runtime on the same XFS disk for reflink):
 
@@ -53,7 +53,7 @@ When `gcs_uri` is configured in `images.yaml` and the template does not exist lo
 
 ## Docker image
 
-The server uses `trycua/cua-qemu-windows:latest` (configurable via `docker_image` in `server.yaml`). This image contains QEMU with Windows support and a CUA computer-server that starts on port 5000.
+The server uses `trycua/cua-qemu-windows:latest` (configurable via `docker_image` in the host YAML). This image contains QEMU with Windows support and a CUA computer-server that starts on port 5000.
 
 Pull before first run:
 
@@ -99,7 +99,7 @@ rather than installing a systemd unit. Adjust paths to match the host.
 Standalone example:
 
 ```bash
-cd /home/weichenzhang/cua-house-mnc
+cd /opt/cua-house
 setsid nohup uv run python -m cua_house_server.cli \
   --host-config /etc/cua-house/server.yaml \
   --image-catalog /etc/cua-house/images.yaml \
@@ -131,44 +131,61 @@ gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
   /mnt/agenthle-task-data/<domain>/<task>/<variant>/
 ```
 
-### Multi-node setup (shared read-only + OverlayFS)
+### Multi-node setup (per-worker read-write disks)
 
-To share a single task-data disk across multiple KVM nodes without duplication, attach the GCP persistent disk to multiple VMs in `READ_ONLY` mode and use OverlayFS on each node to provide a local writable layer. Writes (e.g., `output/`) land on the local upper layer; reads of `input/`, `reference/`, `software/` transparently pass through to the shared disk.
+Each KVM worker owns its own task-data disk. This uses more storage than
+the old single-disk model, but it lets every worker refresh from GCS
+independently before manual startup. Updating task data no longer requires
+detaching one disk from the whole cluster. The per-worker disk is
+attached `READ_WRITE` to exactly one VM so startup can sync it, but normal
+worker execution mounts that disk read-only and writes only to the local
+OverlayFS upper layer on `/mnt/xfs`.
 
 ```bash
-# 1. Attach the disk in multi-reader mode
-gcloud compute instances attach-disk <node> \
-    --disk=<shared-task-data-disk> --device-name=task-data --mode=ro \
+# 1. Create or clone a disk for this worker.
+gcloud compute disks create <node>-task-data \
+    --source-snapshot=<current-task-data-snapshot> \
+    --type=pd-balanced --size=400GB \
     --zone=<zone> --project=<project>
 
-# 2. Mount the shared disk at a separate lower-layer path
-sudo mkdir -p /mnt/agenthle-task-data-ro
-sudo mount -o ro,noload /dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro
-# (noload skips ext4 journal replay — required for read-only multi-attach)
+# 2. Attach the disk to exactly one worker in read-write mode.
+gcloud compute instances attach-disk <node> \
+    --disk=<node>-task-data --device-name=task-data --mode=rw \
+    --zone=<zone> --project=<project>
 
-# 3. Create upper + work dirs on a local writable filesystem (XFS recommended)
+# 3. Mount the data disk read-only as the lower layer and expose a
+#    writable OverlayFS view at task_data_root.
+sudo mkdir -p /mnt/agenthle-task-data-ro /mnt/agenthle-task-data
+sudo mount -o ro,noload /dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro
 sudo mkdir -p /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
 sudo chown $(id -u):$(id -g) /mnt/xfs/task-data-upper /mnt/xfs/task-data-work
-
-# 4. Mount the overlay at task_data_root (what the server reads)
-sudo mkdir -p /mnt/agenthle-task-data
 sudo mount -t overlay overlay \
     -o lowerdir=/mnt/agenthle-task-data-ro,upperdir=/mnt/xfs/task-data-upper,workdir=/mnt/xfs/task-data-work \
     /mnt/agenthle-task-data
+
+# 4. Start manually through the sync wrapper. It unmounts the overlay,
+#    remounts the lower disk read-write, syncs GCS, remounts read-only,
+#    restores the overlay, then starts the worker.
+cd /opt/cua-house
+./scripts/start-worker.sh
 ```
 
 To persist across reboots, add to `/etc/fstab`:
 
 ```
-LABEL=<disk-label> /mnt/agenthle-task-data-ro ext4 ro,noload,nofail 0 0
+/dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro ext4 ro,noload,nofail 0 0
 overlay /mnt/agenthle-task-data overlay lowerdir=/mnt/agenthle-task-data-ro,upperdir=/mnt/xfs/task-data-upper,workdir=/mnt/xfs/task-data-work,nofail 0 0
 ```
 
-The upper layer (`/mnt/xfs/task-data-upper/`) accumulates over time. The server's staging phase resets each task's `output/` dir before every run, so stale outputs don't leak between task executions. You can periodically wipe the entire upper layer if disk usage grows too large:
+Use `scripts/start-worker.sh` for the normal manual start path; it checks
+the mounts, syncs `gs://agenthle` into the per-worker lower disk, returns
+that disk to read-only mode, exports `/etc/cua-house/worker.env`, and
+starts the worker process with `setsid nohup`.
 
-```bash
-sudo rm -rf /mnt/xfs/task-data-upper/* /mnt/xfs/task-data-work/*
-```
+The task-data bucket must contain task input/reference/software data only.
+Do not place qcow2 exports or VM templates under `gs://agenthle`; worker
+startup mirrors that bucket into each node's 400G data disk. VM images
+belong under `gs://agenthle-images/templates/<image-key>/`.
 
 ## Environment variables
 

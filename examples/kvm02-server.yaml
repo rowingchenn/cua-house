@@ -1,3 +1,6 @@
+# Legacy standalone host example for the original kvm02 deployment.
+# Do not use this as a cluster worker config. Cluster workers should use
+# examples/worker.yaml rendered to /etc/cua-house/worker.yaml.
 host_id: kvm-02-prod
 host_external_ip: auto
 public_base_host: auto

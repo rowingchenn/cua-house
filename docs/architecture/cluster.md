@@ -119,8 +119,7 @@ lease proxy is a compatibility path.
   `task_finalized_callback` → `TaskCompleted` over WS.
 * Worker startup **prewarms all enabled image templates in parallel**
   from GCS before joining the cluster. A pull failure fails the
-  process (systemd/docker restart retries). No lazy template pull at
-  task time.
+  manually started worker process. No lazy template pull at task time.
 
 ### Clients
 
@@ -145,7 +144,7 @@ for (1) and still go direct for (2). Both work.
 | Lease record + VM handle      | Worker `EnvScheduler`           | In-memory (lost on worker crash)   |
 | Running VM's docker container | Worker `DockerQemuRuntime`      | Docker daemon (survives worker process restart; cleanup sweep on next start) |
 | Snapshot cache (qcow2 per shape) | Worker local filesystem      | `snapshot_cache_dir` on persistent XFS |
-| Task data                     | Shared GCE PD + per-worker OverlayFS | PD read-only, upper layer per-node |
+| Task data                     | Per-worker GCE PD + per-worker OverlayFS | PD normally mounted read-only, upper layer on worker XFS |
 
 **Master's capacity ledger is authoritative.** Free vcpus / memory on
 each worker = `total - reserved - sum(assigned RUNNING task shapes
@@ -268,8 +267,8 @@ failure.
 ### Template pull failure
 
 Worker prewarm at startup: if any enabled image's GCS pull fails,
-`prewarm_templates` raises, lifespan fails, uvicorn exits. systemd /
-docker restart retries with a clean state. `pull_template` is
+`prewarm_templates` raises, lifespan fails, and uvicorn exits. Restart
+the worker manually after fixing the underlying issue. `pull_template` is
 idempotent (checks file existence first), so partial prewarm from a
 previous attempt is safe.
 
