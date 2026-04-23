@@ -1,6 +1,6 @@
 # Image update SOP
 
-Procedure for updating VM images (cpu-free, cpu-free-ubuntu, waa) in a cua-house cluster. GCS is the source of truth for base templates. Templates are clean qcow2 files without pre-baked savevm tags -- the server creates shape-based snapshot tags (e.g., `4vcpu-8gb-64gb`) automatically on first cache miss.
+Procedure for updating VM images (cpu-free, cpu-license, cpu-free-ubuntu, waa) in a cua-house cluster. GCS is the source of truth for base templates. Templates are clean qcow2 files without pre-baked savevm tags -- the server creates shape-based snapshot tags (e.g., `4vcpu-8gb-64gb`) automatically on first cache miss.
 
 ## When to use
 
@@ -14,15 +14,24 @@ Procedure for updating VM images (cpu-free, cpu-free-ubuntu, waa) in a cua-house
 - `gsutil` access to `gs://agenthle-images/` and `gs://agenthle/vm-images/`
 - SSH access to at least one KVM host (agenthle-nested-kvm-02, kvm-03, etc.)
 - Master cluster running and healthy (`GET /v1/cluster/workers` returns 200)
+- KVM image storage on a reflink-capable filesystem (current workers use XFS at `/mnt/xfs`). Cold-boot tests must use the same reflink slot layout as the worker runtime, not a full `cp` into `/tmp`.
 
 ## Step 1: Make changes on GCP dev VM
 
 SSH into the dev VM and make your changes. Shut down Windows cleanly when done (Start > Shut down, or `shutdown /s /t 0`).
 
 ```bash
-IMAGE_KEY=cpu-free  # or cpu-free-ubuntu, waa
+IMAGE_KEY=cpu-free  # or cpu-license, cpu-free-ubuntu, waa
 gcloud compute ssh agenthle-dev-${IMAGE_KEY} \
     --zone=us-west1-a --project=sunblaze-4
+```
+
+Some legacy dev VMs do not follow `agenthle-dev-${IMAGE_KEY}` exactly. Confirm the VM, zone, and boot disk before exporting:
+
+```bash
+gcloud compute instances list --project=sunblaze-4 \
+  --filter='name~agenthle-dev|name~agenthle-ubuntu|name~waa' \
+  --format='table(name,zone.basename(),status,disks[0].source.basename())'
 ```
 
 ## Step 1b: Pre-export cleanup on the dev VM
@@ -61,7 +70,7 @@ Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
 
 Then shut down cleanly (Linux: `sudo shutdown -h now`, Windows: `shutdown /s /t 0`).
 
-## Step 2: Export boot disk to qcow2
+## Step 2: Export boot disks to qcow2 staging
 
 ```bash
 DATE=$(date +%Y%m%d)
@@ -70,45 +79,150 @@ IMAGE_KEY=cpu-free
 ./scripts/export-gcp-to-qcow2.sh --image-key ${IMAGE_KEY} --date ${DATE}
 ```
 
-This creates `gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2` via Cloud Build. The export takes a few minutes. Monitor progress:
+This creates `gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2` via Cloud Build. For a batch update, run independent image exports in parallel. Each export creates a GCP snapshot, a temporary GCE image, and a staging qcow2 object.
+
+If the dev VM name or zone does not match the script defaults, run the same steps manually:
 
 ```bash
-gcloud builds list --project=sunblaze-4 --limit=5
+PROJECT=sunblaze-4
+DATE=$(date +%Y%m%d)
+IMAGE_KEY=cpu-free-ubuntu
+ZONE=us-west2-a
+DISK=agenthle-ubuntu
+
+SNAPSHOT_NAME=agenthle-dev-${IMAGE_KEY}-export-${DATE}
+IMAGE_NAME=agenthle-dev-${IMAGE_KEY}-export-${DATE}
+GCS_URI=gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2
+
+gcloud compute disks snapshot "${DISK}" \
+  --project="${PROJECT}" --zone="${ZONE}" \
+  --snapshot-names="${SNAPSHOT_NAME}" \
+  --storage-location="${ZONE%-*}"
+
+gcloud compute images create "${IMAGE_NAME}" \
+  --project="${PROJECT}" \
+  --source-snapshot="${SNAPSHOT_NAME}"
+
+gcloud compute images export \
+  --image="${IMAGE_NAME}" \
+  --project="${PROJECT}" \
+  --export-format=qcow2 \
+  --destination-uri="${GCS_URI}"
 ```
 
-## Step 3: Transfer to KVM host and cold-boot test
-
-Copy the exported qcow2 to a KVM host and run the cold-boot test:
+Monitor progress:
 
 ```bash
-# On the KVM host:
-gsutil cp gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2 \
-    /home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
-
-./scripts/cold-boot-test.sh --qcow2 /home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+gcloud builds list --project=sunblaze-4 --region=us-central1 --limit=10
+gcloud builds describe <build-id> --project=sunblaze-4 --region=us-central1 \
+  --format='value(status,finishTime)'
 ```
 
-The test cold-boots the qcow2 without any snapshot tag and verifies the CUA server responds on `/status`. Expect ~3-5 minutes for a cold boot.
-
-**NOTE:** No `savevm` bake step is needed. The server creates shape-based snapshot tags (e.g., `4vcpu-8gb-64gb`) automatically on first cache miss. First boot after deployment takes ~4-5 minutes; subsequent boots from cache take ~30 seconds.
-
-## Step 4: Upload to GCS (source of truth)
+After each export succeeds, verify that the staging object exists and record its size:
 
 ```bash
-./scripts/upload-template.sh --image-key ${IMAGE_KEY} --date ${DATE} \
-    --qcow2 /home/weichenzhang/agenthle-env-images/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+gsutil stat gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2 | \
+  awk '/Creation time|Content-Length/ {print}'
 ```
 
-This uploads to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2`. This step is **required** -- workers prewarm templates from GCS at startup (`prewarm_templates()`). Skipping this means new workers get a stale image.
+## Step 3: Transfer to KVM host and cold-boot test with worker-equivalent layout
+
+Copy the exported qcow2 to a KVM host and test it using the same local-disk behavior as the worker runtime. The worker does **not** fully copy templates into `/tmp`; it runs `cp --reflink=auto` from the template or snapshot cache into a per-VM slot. Use the same pattern for tests.
+
+```bash
+IMAGE_KEY=cpu-free
+DATE=$(date +%Y%m%d)
+KVM=agenthle-nested-kvm-02
+
+gcloud compute ssh "${KVM}" --zone=us-central1-a --project=sunblaze-4 -- '
+  set -euo pipefail
+  IMAGE_KEY='"${IMAGE_KEY}"'
+  DATE='"${DATE}"'
+  BASE=/mnt/xfs/images/${IMAGE_KEY}
+  TEMPLATE=${BASE}/${IMAGE_KEY}-${DATE}.qcow2
+  TEST_ROOT=/mnt/xfs/image-update-tests/${IMAGE_KEY}-${DATE}
+  SLOT=${TEST_ROOT}/storage
+
+  mkdir -p "${BASE}" "${SLOT}" "${TEST_ROOT}/logs"
+  gsutil cp "gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2" "${TEMPLATE}"
+
+  # Match DockerQemuRuntime._prepare_vm(): reflink on XFS, full copy only
+  # if the filesystem cannot reflink. Keep test files on /mnt/xfs.
+  rm -f "${SLOT}/data.qcow2"
+  cp --reflink=auto "${TEMPLATE}" "${SLOT}/data.qcow2"
+
+  docker rm -f cua-house-cold-boot-test >/dev/null 2>&1 || true
+  docker run -d \
+    --name cua-house-cold-boot-test \
+    --device=/dev/kvm \
+    --cap-add NET_ADMIN \
+    -e RAM_SIZE=8G \
+    -e CPU_CORES=4 \
+    -e CPU_MODEL=host \
+    -e HV=N \
+    -e VM_NET_IP=172.30.0.2 \
+    -p 127.0.0.1:15900:5000 \
+    -v "${SLOT}:/storage" \
+    trycua/cua-qemu-windows:latest
+
+  deadline=$((SECONDS + 1200))
+  until curl -fsS http://127.0.0.1:15900/status >/dev/null; do
+    if (( SECONDS > deadline )); then
+      docker logs --tail 80 cua-house-cold-boot-test || true
+      docker rm -f cua-house-cold-boot-test >/dev/null 2>&1 || true
+      exit 1
+    fi
+    sleep 5
+  done
+
+  docker rm -f cua-house-cold-boot-test >/dev/null 2>&1 || true
+  rm -rf "${TEST_ROOT}"
+'
+```
+
+The test cold-boots the qcow2 without any snapshot tag and verifies the CUA server responds on `/status`. Expect ~3-5 minutes for a healthy cold boot, but allow up to 20 minutes for large Windows images. Do not publish an image that boots Windows but never serves `/status`; debug guest-side startup first.
+
+**NOTE:** No `savevm` bake step is needed in the template. The server creates shape-based snapshot tags (e.g., `4vcpu-8gb-64gb`) automatically on first cache miss. First boot after deployment takes ~4-5 minutes; subsequent boots from cache take ~30 seconds.
+
+### Optional: prewarm the worker snapshot cache
+
+After the reflink cold-boot test passes, you can prewarm cache on one or more workers by submitting a smoke task for the new `version` after `images.yaml` is updated. This is the production-equivalent cache path:
+
+1. Worker pulls the template from `gcs_uri`.
+2. Worker reflinks the template into a VM slot.
+3. VM cold-boots and serves the task.
+4. Worker QMP `savevm`s and reflinks the slot qcow2 into `/mnt/xfs/snapshot-cache/<image>/v<version>/`.
+
+Do not manually bake `savevm` into the base template.
+
+## Step 4: Publish to GCS source of truth
+
+```bash
+IMAGE_KEY=cpu-free
+DATE=$(date +%Y%m%d)
+STAGING=gs://agenthle/vm-images/${IMAGE_KEY}-${DATE}.qcow2
+TEMPLATE=gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2
+
+# Server-side GCS copy; do not re-upload hundreds of GB from the KVM host.
+gsutil cp "${STAGING}" "${TEMPLATE}"
+
+# Verify size parity.
+gsutil stat "${STAGING}" "${TEMPLATE}" | awk '/gs:|Content-Length/ {print}'
+```
+
+Publishing to `gs://agenthle-images/templates/${IMAGE_KEY}/${IMAGE_KEY}-${DATE}.qcow2` is **required** -- workers prewarm templates from GCS at startup (`prewarm_templates()`). Skipping this means new workers get a stale image.
+
+Only publish images that passed the KVM cold-boot `/status` test. Keep failed staging objects for debugging or delete them after root cause is understood.
 
 ## Step 5: Sync task data (if changed)
 
-If you added or modified task data (input files, software, reference data), sync GCS to the shared task-data disk. GCS bucket `gs://agenthle/task-data/` is the source of truth.
+If you added or modified task data (input files, software, reference data), sync the canonical AgentHLE GCS prefix to the shared task-data disk. The source of truth is `gs://agenthle/<domain>/<task>/<variant>/`, mirrored to `/mnt/agenthle-task-data/<domain>/<task>/<variant>/`. The bucket path should match `TaskDataRequest.source_relpath` exactly.
 
 **Single-node (standalone):**
 
 ```bash
-gsutil -m rsync -r gs://agenthle/task-data/ /mnt/agenthle-task-data/
+gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
+  /mnt/agenthle-task-data/<domain>/<task>/<variant>/
 ```
 
 **Multi-node (cluster):** The shared persistent disk (`agenthle-nested-kvm-01-task-data`) is attached read-only to all workers. To update:
@@ -121,7 +235,9 @@ gcloud compute instances attach-disk <node> \
     --zone=us-central1-a --project=sunblaze-4
 gcloud compute ssh <node> -- \
     'sudo mount /dev/disk/by-id/google-task-data /mnt/agenthle-task-data-ro && \
-     gsutil -m rsync -r gs://agenthle/task-data/ /mnt/agenthle-task-data-ro/ && \
+     sudo mkdir -p /mnt/agenthle-task-data-ro/<domain>/<task>/<variant> && \
+     gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
+       /mnt/agenthle-task-data-ro/<domain>/<task>/<variant>/ && \
      sudo umount /mnt/agenthle-task-data-ro'
 
 # 3. Re-attach RO to workers (or restart workers — clone-worker.sh handles this)

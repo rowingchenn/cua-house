@@ -120,14 +120,15 @@ Only port 8787 needs to be open to clients. Internal CUA ports (15000-15999) and
 
 ## Task data disk provisioning
 
-Task data is organized as `{category}/{task_tag}/{variant}/input/`, `reference/`, `software/`, `output/`. For local Docker/QEMU VMs, `task_data_root` is bind-mounted into each container at `/shared/agenthle` and exposed to guests via Samba (Windows: `E:` drive; Linux: CIFS mount at `/media/user/data/agenthle`).
+Task data is organized as `<domain>/<task>/<variant>/input/`, `reference/`, `software/`, `output/`. This matches the AgentHLE canonical bucket layout `gs://agenthle/<domain>/<task>/<variant>/`; do not insert a `task-data/` path component. For local Docker/QEMU VMs, `task_data_root` is bind-mounted into each container at `/shared/agenthle` and exposed to guests via Samba (Windows: `E:` drive; Linux: CIFS mount at `/media/user/data/agenthle`).
 
 ### Simple setup (single-node, read-write)
 
-Mount a local writable disk at `task_data_root` (e.g., `/mnt/agenthle-task-data`) and populate it from GCS:
+Mount a local writable disk at `task_data_root` (e.g., `/mnt/agenthle-task-data`) and populate it from the matching canonical GCS prefix:
 
 ```bash
-gsutil -m rsync -r gs://agenthle/task-data/ /mnt/agenthle-task-data/
+gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
+  /mnt/agenthle-task-data/<domain>/<task>/<variant>/
 ```
 
 ### Multi-node setup (shared read-only + OverlayFS)

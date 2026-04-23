@@ -64,8 +64,11 @@ Workers share read-only task-data via a GCE persistent disk + OverlayFS.
 See `docs/deployment/host-setup.md` (section "Multi-node task-data
 sharing") for the exact recipe. In short:
 
-1. A single PD populated from `gs://agenthle/task-data/` attached
-   `READ_ONLY` to every worker.
+1. A single PD populated from the AgentHLE canonical task-data layout
+   (`gs://agenthle/<domain>/<task>/<variant>/`) attached `READ_ONLY`
+   to every worker. The disk preserves the same relative path under
+   `/mnt/agenthle-task-data-ro/<domain>/<task>/<variant>/`; do not add
+   a `task-data/` prefix inside the bucket or the disk.
 2. Each worker mounts the PD at `/mnt/agenthle-task-data-ro`, a local XFS
    upper layer at `/mnt/xfs/task-data-upper`, and an OverlayFS merged view
    at `/mnt/agenthle-task-data` — which is what `task_data_root` points to.

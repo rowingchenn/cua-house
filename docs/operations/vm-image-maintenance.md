@@ -313,7 +313,8 @@ tail -f server.log
 ### Step 7: Sync task data (if needed)
 
 ```bash
-gsutil -m rsync -r gs://agenthle/task-data/ /mnt/agenthle-task-data/
+gsutil -m rsync -r gs://agenthle/<domain>/<task>/<variant>/ \
+  /mnt/agenthle-task-data/<domain>/<task>/<variant>/
 ```
 
 ---
