@@ -162,6 +162,24 @@ gsutil iam ch serviceAccount:SA@PROJECT.iam.gserviceaccount.com:roles/storage.ob
 
 **Fix**: Rebake the snapshot: cold-boot → `apt install cifs-utils` → `savevm`. This only needs to be done once per image.
 
+### 13a. Linux CIFS mount must use the guest gateway IP
+
+**Symptom**: Linux task staging reports `task_data_injected` and
+`stage-runtime` returns 200, but the guest path
+`/media/user/data/agenthle/...` is missing. Running the mount manually shows
+`mount(2) system call failed: No route to host` for
+`//host.lan/Data/agenthle`.
+
+**Root cause**: `host.lan` resolves in userspace, and TCP probes to port 445 can
+work, but the kernel CIFS mount path can still fail against that hostname in
+the nested guest. The Samba service is reachable at the guest gateway
+`172.30.0.1`.
+
+**Fix**: Use `//172.30.0.1/Data/agenthle` for Linux CIFS mounts and make the
+mount helper verify `mountpoint -q` after the mount command. Otherwise the
+shell can end with a later successful command and staging appears successful
+even though the mount failed.
+
 ### 14. ext4 read-only multi-attach needs `noload` mount option
 
 **Symptom**: `mount -o ro` fails on a GCP persistent disk attached in READ_ONLY mode to multiple VMs.

@@ -25,7 +25,7 @@ PhaseName = Literal["runtime", "eval"]
 
 SAMBA_SHARE_ROOT = r"\\host.lan\Data"
 LINUX_DATA_MOUNT = "/media/user/data/agenthle"
-LINUX_SAMBA_SOURCE = "//host.lan/Data/agenthle"
+LINUX_SAMBA_SOURCE = "//172.30.0.1/Data/agenthle"
 
 
 @dataclass(slots=True)
@@ -267,9 +267,10 @@ class TaskDataManager:
         await self._run_remote(
             client, cua_url,
             f"sudo mkdir -p {LINUX_DATA_MOUNT} && "
-            f"mountpoint -q {LINUX_DATA_MOUNT} || "
+            f"(mountpoint -q {LINUX_DATA_MOUNT} || "
             f"sudo mount -t cifs {LINUX_SAMBA_SOURCE} {LINUX_DATA_MOUNT} "
-            f"-o guest,uid=1000,gid=1000,file_mode=0755,dir_mode=0755",
+            f"-o guest,uid=1000,gid=1000,file_mode=0755,dir_mode=0755,vers=1.0) && "
+            f"mountpoint -q {LINUX_DATA_MOUNT}",
         )
 
     # ------------------------------------------------------------------
